@@ -1,0 +1,7 @@
+credentials.json
+token.json
+contacts_data.json
+
+__pycache__/
+venv/
+.env
