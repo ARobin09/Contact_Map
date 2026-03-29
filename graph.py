@@ -45,7 +45,8 @@ PERSON_FIELDS = ",".join([
 ])
 
 # Built-in Google system groups we never want to show
-SYSTEM_GROUP_BLOCKLIST = {"myContacts", "all", "blocked", "chatBuddies", "coworkers"}
+# Built-in Google system groups that should never appear in the graph
+SYSTEM_GROUP_BLOCKLIST = {"myContacts", "all", "blocked"}
 
 def fetch_groups():
     groups = {}
@@ -375,6 +376,36 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   .status-msg.success { background: rgba(62,207,142,0.12); color: var(--success); display: block; }
   .status-msg.error   { background: rgba(232,91,91,0.12);  color: var(--danger);  display: block; }
 
+  /* Search */
+  .search-wrap { position: relative; margin-left: 24px; }
+  #search-input {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-family: 'DM Mono', monospace; font-size: 12px;
+    padding: 6px 12px 6px 30px; outline: none; width: 220px; transition: border-color 0.2s;
+  }
+  #search-input:focus { border-color: var(--accent); }
+  #search-input::placeholder { color: var(--muted); }
+  .search-icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 13px; pointer-events: none; }
+  #search-results {
+    position: absolute; top: calc(100% + 6px); left: 0; width: 280px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 100; display: none;
+    max-height: 280px; overflow-y: auto;
+  }
+  #search-results::-webkit-scrollbar { width: 4px; }
+  #search-results::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .search-result {
+    padding: 9px 14px; cursor: pointer; font-size: 13px;
+    border-bottom: 1px solid var(--border); transition: background 0.15s;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .search-result:last-child { border-bottom: none; }
+  .search-result:hover, .search-result.active { background: var(--surface2); }
+  .search-result-name { color: var(--text); font-family: 'DM Sans', sans-serif; }
+  .search-result-sub { color: var(--muted); font-size: 11px; font-family: 'DM Mono', monospace; }
+  .search-result mark { background: none; color: var(--accent); font-weight: 600; }
+  .search-empty { padding: 12px 14px; color: var(--muted); font-size: 12px; font-family: 'DM Mono', monospace; }
+
   #loading { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; z-index: 999; }
   .spinner { width: 36px; height: 36px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -388,6 +419,11 @@ GRAPH_HTML = r"""<!DOCTYPE html>
 <header>
   <div class="dot"></div>
   <h1>contact_map</h1>
+  <div class="search-wrap">
+    <span class="search-icon">⌕</span>
+    <input id="search-input" type="text" placeholder="Search contacts...">
+    <div id="search-results"></div>
+  </div>
   <div class="legend">
     <div class="legend-item"><div class="legend-dot" style="background:#5b8dee"></div><span>person</span></div>
     <div class="legend-item"><div class="legend-dot" style="background:#e85b8d"></div><span>group</span></div>
@@ -734,6 +770,113 @@ async function saveContact() {
 document.getElementById('close-panel').addEventListener('click', closePanel);
 document.getElementById('cancel-btn').addEventListener('click', closePanel);
 document.getElementById('save-btn').addEventListener('click', saveContact);
+
+// ── Search ───────────────────────────────────────────────────────────────────
+const searchInput   = document.getElementById('search-input');
+const searchResults = document.getElementById('search-results');
+
+function highlight(text, query) {
+  if (!query) return text;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return text;
+  return text.slice(0, idx) + '<mark>' + text.slice(idx, idx + query.length) + '</mark>' + text.slice(idx + query.length);
+}
+
+let searchIndex = -1; // currently highlighted result
+
+function selectResult(item) {
+  network.focus(item.dataset.rn, { scale: 1.5, animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+  network.selectNodes([item.dataset.rn]);
+  openPanel(allContacts[item.dataset.rn]);
+  searchInput.value = '';
+  searchResults.style.display = 'none';
+  searchIndex = -1;
+}
+
+function setActiveResult(idx) {
+  const items = searchResults.querySelectorAll('.search-result');
+  items.forEach((el, i) => {
+    el.classList.toggle('active', i === idx);
+    if (i === idx) el.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function doSearch(query) {
+  searchResults.innerHTML = '';
+  searchIndex = -1;
+  if (!query.trim()) { searchResults.style.display = 'none'; return; }
+
+  const q = query.toLowerCase();
+  function matchesWordStart(text) {
+    return text.toLowerCase().split(/\s+/).some(word => word.startsWith(q));
+  }
+  const matches = Object.values(allContacts).filter(c =>
+    matchesWordStart(c.name) ||
+    (c.emails||[]).some(e => matchesWordStart(e)) ||
+    (c.phones||[]).some(p => p.number.includes(q))
+  ).slice(0, 12);
+
+  if (!matches.length) {
+    searchResults.innerHTML = '<div class="search-empty">No contacts found</div>';
+    searchResults.style.display = 'block';
+    return;
+  }
+
+  matches.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'search-result';
+    item.dataset.rn = c.resourceName;
+    const sub = c.emails[0] || (c.phones[0] && c.phones[0].number) || (c.groupNames||[]).join(', ') || '';
+    item.innerHTML = `<span class="search-result-name">${highlight(c.name, query)}</span>
+                      <span class="search-result-sub">${highlight(sub, query)}</span>`;
+    item.onclick = () => selectResult(item);
+    searchResults.appendChild(item);
+  });
+  searchResults.style.display = 'block';
+}
+
+searchInput.addEventListener('input', e => doSearch(e.target.value));
+searchInput.addEventListener('keydown', e => {
+  const items = searchResults.querySelectorAll('.search-result');
+  if (e.key === 'Escape') {
+    searchResults.style.display = 'none';
+    searchInput.blur();
+    searchIndex = -1;
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    searchIndex = Math.min(searchIndex + 1, items.length - 1);
+    setActiveResult(searchIndex);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    searchIndex = Math.max(searchIndex - 1, 0);
+    setActiveResult(searchIndex);
+  } else if (e.key === 'Tab') {
+    if (!items.length) return;
+    e.preventDefault();
+    if (e.shiftKey) {
+      searchIndex = Math.max(searchIndex - 1, 0);
+    } else {
+      searchIndex = Math.min(searchIndex + 1, items.length - 1);
+    }
+    setActiveResult(searchIndex);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (searchIndex >= 0 && items[searchIndex]) {
+      selectResult(items[searchIndex]);
+    } else if (items.length === 1) {
+      selectResult(items[0]);
+    }
+  }
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('.search-wrap')) { searchResults.style.display = 'none'; searchIndex = -1; }
+});
+// Ctrl+K or / to focus search
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey && e.key === 'k') || (!e.target.closest('input, textarea') && e.key === '/')) {
+    e.preventDefault(); searchInput.focus(); searchInput.select();
+  }
+});
 
 loadGraph();
 </script>
