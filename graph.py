@@ -378,7 +378,7 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   #search-input {
     background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
     color: var(--text); font-family: 'DM Mono', monospace; font-size: 12px;
-    padding: 6px 12px 6px 30px; outline: none; width: 220px; transition: border-color 0.2s;
+    padding: 6px 12px 6px 30px; outline: none; width: 260px; transition: border-color 0.2s;
   }
   #search-input:focus { border-color: var(--accent); }
   #search-input::placeholder { color: var(--muted); }
@@ -402,6 +402,12 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   .search-result-sub { color: var(--muted); font-size: 11px; font-family: 'DM Mono', monospace; }
   .search-result mark { background: none; color: var(--accent); font-weight: 600; }
   .search-empty { padding: 12px 14px; color: var(--muted); font-size: 12px; font-family: 'DM Mono', monospace; }
+  .search-result-group { border-left: 2px solid var(--accent2); }
+  .search-section-header {
+    padding: 6px 14px 4px; font-family: 'DM Mono', monospace; font-size: 10px;
+    color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em;
+    background: var(--surface2); border-bottom: 1px solid var(--border);
+  }
 
   #loading { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; z-index: 999; }
   .spinner { width: 36px; height: 36px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
@@ -418,7 +424,7 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   <h1>contact_map</h1>
   <div class="search-wrap">
     <span class="search-icon">⌕</span>
-    <input id="search-input" type="text" placeholder="Search contacts...">
+    <input id="search-input" type="text" placeholder="Search contacts & groups...">
     <div id="search-results"></div>
   </div>
   <div class="legend">
@@ -467,7 +473,7 @@ async function reloadGraph() {
     if ((g.memberCount||0) === 0) return;
     nodes.add({ id: rn, label: g.name, type: 'group',
       color: { background: '#1f1529', border: '#e85b8d', highlight: { background: '#2a1a38', border: '#e85b8d' } },
-      font: { color: '#e85b8d', size: 13, face: 'DM Mono' }, shape: 'dot', size: 22, borderWidth: 2 });
+      font: { color: '#e85b8d', size: 14, face: 'DM Mono' }, shape: 'dot', size: 34, borderWidth: 2.5 });
   });
 
   data.contacts.forEach(c => {
@@ -498,7 +504,7 @@ async function loadGraph() {
     if ((g.memberCount||0) === 0) return; // empty groups don't appear in graph
     nodes.add({ id: rn, label: g.name, type: 'group',
       color: { background: '#1f1529', border: '#e85b8d', highlight: { background: '#2a1a38', border: '#e85b8d' } },
-      font: { color: '#e85b8d', size: 13, face: 'DM Mono' }, shape: 'dot', size: 22, borderWidth: 2 });
+      font: { color: '#e85b8d', size: 14, face: 'DM Mono' }, shape: 'dot', size: 34, borderWidth: 2.5 });
   });
 
   data.contacts.forEach(c => {
@@ -854,12 +860,26 @@ function highlight(text, query) {
   return text.slice(0, idx) + '<mark>' + text.slice(idx, idx + query.length) + '</mark>' + text.slice(idx + query.length);
 }
 
-let searchIndex = -1; // currently highlighted result
+let searchIndex = -1;
 
-function selectResult(item) {
+function selectContactResult(item) {
   network.focus(item.dataset.rn, { scale: 1.5, animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
   network.selectNodes([item.dataset.rn]);
   openPanel(allContacts[item.dataset.rn]);
+  searchInput.value = '';
+  searchResults.style.display = 'none';
+  searchIndex = -1;
+}
+
+function selectGroupResult(item) {
+  const rn = item.dataset.rn;
+  if (allGroups[rn] && (allGroups[rn].memberCount||0) > 0) {
+    network.focus(rn, { scale: 1.5, animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+    const memberRns = Object.values(allContacts)
+      .filter(c => (c.groups||[]).includes(rn))
+      .map(c => c.resourceName);
+    network.selectNodes([rn, ...memberRns]);
+  }
   searchInput.value = '';
   searchResults.style.display = 'none';
   searchIndex = -1;
@@ -882,29 +902,64 @@ function doSearch(query) {
   function matchesWordStart(text) {
     return text.toLowerCase().split(/\s+/).some(word => word.startsWith(q));
   }
-  const matches = Object.values(allContacts).filter(c =>
+
+  // Match groups
+  const groupMatches = Object.entries(allGroups).filter(([, g]) =>
+    g.name.toLowerCase().split(/\s+/).some(w => w.startsWith(q))
+  );
+
+  // Match contacts
+  const contactMatches = Object.values(allContacts).filter(c =>
     matchesWordStart(c.name) ||
     (c.nicknames||[]).some(n => matchesWordStart(n)) ||
     (c.emails||[]).some(e => matchesWordStart(e)) ||
     (c.phones||[]).some(p => p.number.includes(q))
-  ).slice(0, 12);
+  ).slice(0, 10);
 
-  if (!matches.length) {
-    searchResults.innerHTML = '<div class="search-empty">No contacts found</div>';
+  if (!groupMatches.length && !contactMatches.length) {
+    searchResults.innerHTML = '<div class="search-empty">No results found</div>';
     searchResults.style.display = 'block';
     return;
   }
 
-  matches.forEach(c => {
-    const item = document.createElement('div');
-    item.className = 'search-result';
-    item.dataset.rn = c.resourceName;
-    const sub = c.emails[0] || (c.phones[0] && c.phones[0].number) || (c.groupNames||[]).join(', ') || '';
-    item.innerHTML = `<span class="search-result-name">${highlight(c.name, query)}</span>
-                      <span class="search-result-sub">${highlight(sub, query)}</span>`;
-    item.onclick = () => selectResult(item);
-    searchResults.appendChild(item);
-  });
+  // Groups section
+  if (groupMatches.length) {
+    const header = document.createElement('div');
+    header.className = 'search-section-header';
+    header.textContent = 'Groups';
+    searchResults.appendChild(header);
+    groupMatches.forEach(([rn, g]) => {
+      const item = document.createElement('div');
+      item.className = 'search-result search-result-group';
+      item.dataset.rn = rn;
+      item.dataset.type = 'group';
+      const count = g.memberCount || 0;
+      item.innerHTML = `<span class="search-result-name">${highlight(g.name, query)}</span>
+                        <span class="search-result-sub">${count} member${count !== 1 ? 's' : ''}</span>`;
+      item.onclick = () => selectGroupResult(item);
+      searchResults.appendChild(item);
+    });
+  }
+
+  // Contacts section
+  if (contactMatches.length) {
+    const header = document.createElement('div');
+    header.className = 'search-section-header';
+    header.textContent = 'Contacts';
+    searchResults.appendChild(header);
+    contactMatches.forEach(c => {
+      const item = document.createElement('div');
+      item.className = 'search-result';
+      item.dataset.rn = c.resourceName;
+      item.dataset.type = 'contact';
+      const sub = c.emails[0] || (c.phones[0] && c.phones[0].number) || (c.groupNames||[]).join(', ') || '';
+      item.innerHTML = `<span class="search-result-name">${highlight(c.name, query)}</span>
+                        <span class="search-result-sub">${highlight(sub, query)}</span>`;
+      item.onclick = () => selectContactResult(item);
+      searchResults.appendChild(item);
+    });
+  }
+
   searchResults.style.display = 'block';
 }
 
@@ -934,10 +989,9 @@ searchInput.addEventListener('keydown', e => {
     setActiveResult(searchIndex);
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    if (searchIndex >= 0 && items[searchIndex]) {
-      selectResult(items[searchIndex]);
-    } else if (items.length === 1) {
-      selectResult(items[0]);
+    const active = searchIndex >= 0 ? items[searchIndex] : (items.length === 1 ? items[0] : null);
+    if (active) {
+      active.dataset.type === 'group' ? selectGroupResult(active) : selectContactResult(active);
     }
   }
 });
