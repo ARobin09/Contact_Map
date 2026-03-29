@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Contact Map</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CiAgPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iOCIgZmlsbD0iIzBkMGYxNCIvPgogIDwhLS0gZWRnZXMgLS0+CiAgPGxpbmUgeDE9IjgiIHkxPSI4IiB4Mj0iMjQiIHkyPSIxNiIgc3Ryb2tlPSIjM2Q2ZmQ0IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI4IiB5MT0iOCIgeDI9IjE2IiB5Mj0iMjYiIHN0cm9rZT0iIzNkNmZkNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iMjQiIHkxPSIxNiIgeDI9IjE2IiB5Mj0iMjYiIHN0cm9rZT0iIzNkNmZkNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iOCIgeTE9IjgiIHgyPSIyNCIgeTI9IjYiIHN0cm9rZT0iIzNkNmZkNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8IS0tIGdyb3VwIG5vZGUgKHBpbmssIGxhcmdlcikgLS0+CiAgPGNpcmNsZSBjeD0iMTYiIGN5PSIxNiIgcj0iNC41IiBmaWxsPSIjZTg1YjhkIi8+CiAgPCEtLSBwZXJzb24gbm9kZXMgKGJsdWUsIHNtYWxsZXIpIC0tPgogIDxjaXJjbGUgY3g9IjgiIGN5PSI4IiByPSIzIiBmaWxsPSIjNWI4ZGVlIi8+CiAgPGNpcmNsZSBjeD0iMjQiIGN5PSIxNiIgcj0iMyIgZmlsbD0iIzViOGRlZSIvPgogIDxjaXJjbGUgY3g9IjE2IiBjeT0iMjYiIHI9IjMiIGZpbGw9IiM1YjhkZWUiLz4KICA8Y2lyY2xlIGN4PSIyNCIgY3k9IjYiIHI9IjMiIGZpbGw9IiM1YjhkZWUiLz4KPC9zdmc+">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.css">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d0f14;
+    --surface: #13161e;
+    --surface2: #1a1e28;
+    --border: #252a38;
+    --accent: #5b8dee;
+    --accent2: #e85b8d;
+    --text: #e2e8f8;
+    --muted: #6b7494;
+    --success: #3ecf8e;
+    --danger: #e85b5b;
+  }
+
+  body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+  header h1 { font-family: 'DM Mono', monospace; font-size: 15px; font-weight: 500; letter-spacing: 0.05em; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .legend { display: flex; gap: 16px; margin-left: auto; font-size: 12px; color: var(--muted); font-family: 'DM Mono', monospace; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+  .main { display: flex; flex: 1; overflow: hidden; position: relative; }
+  #graph { flex: 1; background: var(--bg); width: 100%; }
+
+  /* Panel */
+  #panel { width: 360px; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; transform: translateX(100%); transition: transform 0.3s cubic-bezier(0.4,0,0.2,1); flex-shrink: 0; position: absolute; right: 0; top: 0; bottom: 0; z-index: 10; }
+  #panel.open { transform: translateX(0); }
+
+  .panel-header { padding: 18px 20px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .panel-header h2 { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+  #close-panel { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 20px; line-height: 1; padding: 2px 6px; border-radius: 4px; }
+  #close-panel:hover { color: var(--text); background: var(--surface2); }
+  #refocus-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 3px 7px; transition: color 0.15s, border-color 0.15s; }
+  #refocus-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+  .panel-body { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .panel-body::-webkit-scrollbar { width: 4px; }
+  .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .section-title { font-family: 'DM Mono', monospace; font-size: 10px; font-weight: 500; color: var(--accent); text-transform: uppercase; letter-spacing: 0.12em; padding: 6px 0 2px; border-top: 1px solid var(--border); margin-top: 4px; }
+
+  .field-group { display: flex; flex-direction: column; gap: 5px; }
+  .field-label { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+
+  input[type="text"], textarea, select {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-family: 'DM Sans', sans-serif;
+    font-size: 13px; padding: 7px 10px; outline: none; transition: border-color 0.2s; resize: vertical;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+  select option { background: var(--surface2); }
+
+  /* Dynamic list rows (relations, addresses) */
+  .list-item { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; position: relative; }
+  .list-item-row { display: flex; gap: 6px; }
+  .list-item-row input, .list-item-row select { flex: 1; }
+  .remove-btn { position: absolute; top: 8px; right: 8px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px; flex: none; }
+  .remove-btn:hover { color: var(--danger); }
+  .add-btn { background: var(--surface2); border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-family: 'DM Mono', monospace; font-size: 11px; padding: 7px; cursor: pointer; text-align: center; transition: border-color 0.2s, color 0.2s; width: 100%; }
+  .rel-name-wrap { position: relative; flex: 1; }
+  .rel-autocomplete {
+    position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 200;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4); max-height: 160px; overflow-y: auto; display: none;
+  }
+  .rel-autocomplete-item {
+    padding: 7px 10px; font-size: 12px; cursor: pointer; color: var(--text);
+    border-bottom: 1px solid var(--border); transition: background 0.1s;
+  }
+  .rel-autocomplete-item:last-child { border-bottom: none; }
+  .rel-autocomplete-item:hover, .rel-autocomplete-item.active { background: var(--surface2); }
+  .rel-autocomplete-item mark { background: none; color: var(--accent); font-weight: 600; }
+  .add-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Group checkboxes */
+  .group-list { display: flex; flex-direction: column; gap: 6px; }
+  .group-check { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
+  .group-check input[type="checkbox"] { accent-color: var(--accent2); width: 14px; height: 14px; flex-shrink: 0; }
+
+  .divider { height: 1px; background: var(--border); }
+
+  .panel-footer { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+  .footer-btns { display: flex; gap: 8px; }
+  button { padding: 9px 14px; border-radius: 6px; font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; cursor: pointer; border: none; transition: opacity 0.15s; }
+  #save-btn { flex: 1; background: var(--accent); color: #fff; }
+  #save-btn:hover { opacity: 0.85; }
+  #save-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #cancel-btn { flex: 1; background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+  #cancel-btn:hover { color: var(--text); }
+
+  .field-error { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--danger); margin-top: 3px; display: none; }
+  .field-error.visible { display: block; }
+  input.invalid, textarea.invalid, select.invalid { border-color: var(--danger) !important; }
+  .status-msg { font-family: 'DM Mono', monospace; font-size: 11px; text-align: center; padding: 6px; border-radius: 4px; display: none; }
+  .status-msg.success { background: rgba(62,207,142,0.12); color: var(--success); display: block; }
+  .status-msg.error   { background: rgba(232,91,91,0.12);  color: var(--danger);  display: block; }
+
+  /* Search */
+  .search-wrap { position: relative; margin-left: 24px; }
+  #search-input {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-family: 'DM Mono', monospace; font-size: 12px;
+    padding: 6px 12px 6px 30px; outline: none; width: 260px; transition: border-color 0.2s;
+  }
+  #search-input:focus { border-color: var(--accent); }
+  #search-input::placeholder { color: var(--muted); }
+  .search-icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 13px; pointer-events: none; }
+  #search-results {
+    position: absolute; top: calc(100% + 6px); left: 0; width: 280px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 100; display: none;
+    max-height: 280px; overflow-y: auto;
+  }
+  #search-results::-webkit-scrollbar { width: 4px; }
+  #search-results::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .search-result {
+    padding: 9px 14px; cursor: pointer; font-size: 13px;
+    border-bottom: 1px solid var(--border); transition: background 0.15s;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .search-result:last-child { border-bottom: none; }
+  .search-result:hover, .search-result.active { background: var(--surface2); }
+  .search-result-name { color: var(--text); font-family: 'DM Sans', sans-serif; }
+  .search-result-sub { color: var(--muted); font-size: 11px; font-family: 'DM Mono', monospace; }
+  .search-result mark { background: none; color: var(--accent); font-weight: 600; }
+  .search-empty { padding: 12px 14px; color: var(--muted); font-size: 12px; font-family: 'DM Mono', monospace; }
+  .search-result-group { border-left: 2px solid var(--accent2); }
+  .search-section-header {
+    padding: 6px 14px 4px; font-family: 'DM Mono', monospace; font-size: 10px;
+    color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em;
+    background: var(--surface2); border-bottom: 1px solid var(--border);
+  }
+
+  #loading { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; z-index: 999; }
+  .spinner { width: 36px; height: 36px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading p { font-family: 'DM Mono', monospace; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div id="loading"><div class="spinner"></div><p>loading contacts...</p></div>
+
+<header>
+  <div class="dot"></div>
+  <h1>contact_map</h1>
+  <div class="search-wrap">
+    <span class="search-icon">⌕</span>
+    <input id="search-input" type="text" placeholder="Search contacts & groups...">
+    <div id="search-results"></div>
+  </div>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#5b8dee"></div><span>person</span></div>
+    <div class="legend-item"><div class="legend-dot" style="background:#e85b8d"></div><span>group</span></div>
+    <div class="legend-item">
+      <svg width="20" height="10"><line x1="0" y1="5" x2="20" y2="5" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4,4"/></svg>
+      <span>relationship</span>
+    </div>
+  </div>
+</header>
+
+<div class="main">
+  <div id="graph"></div>
+  <div id="panel">
+    <div class="panel-header">
+      <h2 id="panel-title">Contact</h2>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button id="refocus-btn" title="Snap back to this node">⌖</button>
+        <button id="close-panel">×</button>
+      </div>
+    </div>
+    <div class="panel-body" id="panel-body"></div>
+    <div class="panel-footer">
+      <div class="footer-btns">
+        <button id="cancel-btn">Cancel</button>
+        <button id="save-btn">Save Changes</button>
+      </div>
+      <div class="status-msg" id="status-msg"></div>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

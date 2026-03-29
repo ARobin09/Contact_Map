@@ -3,5 +3,6 @@ token.json
 contacts_data.json
 
 __pycache__/
+*.pyc
 venv/
 .env
