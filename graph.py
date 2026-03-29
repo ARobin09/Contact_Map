@@ -155,14 +155,46 @@ def api_update():
             body["nicknames"] = [{"value": data["nickname"]}] if data["nickname"] else []
             fields.append("nicknames")
 
-        if "birthday" in data and data["birthday"]:
-            parts = data["birthday"].split("-")
-            if len(parts) == 3:
-                try:
-                    body["birthdays"] = [{"date": {"year": int(parts[0]), "month": int(parts[1]), "day": int(parts[2])}}]
-                    fields.append("birthdays")
-                except ValueError:
-                    pass
+        if "events" in data:
+            processed = []
+            for ev in data["events"]:
+                date_str = ev.get("date", "")
+                parts = date_str.split("-")
+                if len(parts) == 3:
+                    try:
+                        year_str, month_str, day_str = parts
+                        month = int(month_str)
+                        day   = int(day_str)
+                        year  = 0 if year_str.strip("?") == "" else int(year_str)
+                        date_obj = {"month": month, "day": day}
+                        if year:
+                            date_obj["year"] = year
+                        processed.append({"type": ev.get("type", "anniversary"), "date": date_obj})
+                    except ValueError:
+                        pass
+            body["events"] = processed
+            fields.append("events")
+
+        if "birthday" in data:
+            if not data["birthday"]:
+                # Clear the birthday
+                body["birthdays"] = []
+                fields.append("birthdays")
+            else:
+                parts = data["birthday"].split("-")
+                if len(parts) == 3:
+                    try:
+                        year_str, month_str, day_str = parts
+                        month = int(month_str)
+                        day   = int(day_str)
+                        year  = 0 if year_str.strip("?") == "" else int(year_str)
+                        date_obj = {"month": month, "day": day}
+                        if year:
+                            date_obj["year"] = year
+                        body["birthdays"] = [{"date": date_obj}]
+                        fields.append("birthdays")
+                    except ValueError:
+                        pass
 
         if "addresses" in data:
             body["addresses"] = [
@@ -351,6 +383,19 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   .remove-btn { position: absolute; top: 8px; right: 8px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px; flex: none; }
   .remove-btn:hover { color: var(--danger); }
   .add-btn { background: var(--surface2); border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-family: 'DM Mono', monospace; font-size: 11px; padding: 7px; cursor: pointer; text-align: center; transition: border-color 0.2s, color 0.2s; width: 100%; }
+  .rel-name-wrap { position: relative; flex: 1; }
+  .rel-autocomplete {
+    position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 200;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4); max-height: 160px; overflow-y: auto; display: none;
+  }
+  .rel-autocomplete-item {
+    padding: 7px 10px; font-size: 12px; cursor: pointer; color: var(--text);
+    border-bottom: 1px solid var(--border); transition: background 0.1s;
+  }
+  .rel-autocomplete-item:last-child { border-bottom: none; }
+  .rel-autocomplete-item:hover, .rel-autocomplete-item.active { background: var(--surface2); }
+  .rel-autocomplete-item mark { background: none; color: var(--accent); font-weight: 600; }
   .add-btn:hover { border-color: var(--accent); color: var(--accent); }
 
   /* Group checkboxes */
@@ -369,6 +414,9 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   #cancel-btn { flex: 1; background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
   #cancel-btn:hover { color: var(--text); }
 
+  .field-error { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--danger); margin-top: 3px; display: none; }
+  .field-error.visible { display: block; }
+  input.invalid, textarea.invalid, select.invalid { border-color: var(--danger) !important; }
   .status-msg { font-family: 'DM Mono', monospace; font-size: 11px; text-align: center; padding: 6px; border-radius: 4px; display: none; }
   .status-msg.success { background: rgba(62,207,142,0.12); color: var(--success); display: block; }
   .status-msg.error   { background: rgba(232,91,91,0.12);  color: var(--danger);  display: block; }
@@ -509,7 +557,10 @@ async function reloadGraph() {
             width: 2.5,
             dashes: [5, 5],
             smooth: { type: 'curvedCW', roundness: 0.2 },
-            title: r.type,
+            arrows: { to: { enabled: true, scaleFactor: 0.6 } },
+            label: '',
+            _relType: r.type,
+            font: { color: '#fde68a', size: 11, face: 'DM Mono', background: 'rgba(13,15,20,0.85)', strokeWidth: 0 },
           });
         }
       }
@@ -562,7 +613,10 @@ async function loadGraph() {
             width: 2.5,
             dashes: [5, 5],
             smooth: { type: 'curvedCW', roundness: 0.2 },
-            title: r.type,
+            arrows: { to: { enabled: true, scaleFactor: 0.6 } },
+            label: '',
+            _relType: r.type,
+            font: { color: '#fde68a', size: 11, face: 'DM Mono', background: 'rgba(13,15,20,0.85)', strokeWidth: 0 },
           });
         }
       }
@@ -571,14 +625,60 @@ async function loadGraph() {
 
   network = new vis.Network(document.getElementById('graph'), { nodes, edges }, {
     physics: { stabilization: { iterations: 150 }, barnesHut: { gravitationalConstant: -8000, springLength: 120, springConstant: 0.04 } },
-    interaction: { hover: true },
+    interaction: { hover: true, tooltipDelay: 300 },
+    nodes: {
+      chosen: {
+        node: (values, id, selected, hovering) => {
+          const isContact = !!allContacts[id];
+          if (hovering && !selected) {
+            // Solid fill on hover
+            values.color       = isContact ? '#5b8dee' : '#e85b8d';
+            values.size        = values.size * 1.3;
+            values.shadowSize  = 14;
+            values.shadowColor = isContact ? 'rgba(91,141,238,0.4)' : 'rgba(232,91,141,0.4)';
+            values.shadowX     = 0;
+            values.shadowY     = 0;
+          }
+          if (selected) {
+            values.color       = isContact ? '#5b8dee' : '#e85b8d';
+            values.size        = values.size * 1.5;
+            values.borderWidth = 4;
+            values.shadowSize  = 24;
+            values.shadowColor = isContact ? 'rgba(91,141,238,0.8)' : 'rgba(232,91,141,0.8)';
+            values.shadowX     = 0;
+            values.shadowY     = 0;
+          }
+        }
+      }
+    },
   });
 
   network.on('click', params => {
-    if (!params.nodes.length) return;
+    // Edge click — toggle label
+    if (params.edges.length && !params.nodes.length) {
+      params.edges.forEach(edgeId => {
+        const edge = network.body.data.edges.get(edgeId);
+        if (edge && edge._relType) {
+          const showing = edge.label === edge._relType;
+          network.body.data.edges.update({ id: edgeId, label: showing ? '' : edge._relType });
+        }
+      });
+      return;
+    }
+    if (!params.nodes.length) {
+      // Clicking empty space — hide all edge labels and deselect
+      network.body.data.edges.forEach(e => {
+        if (e._relType && e.label) network.body.data.edges.update({ id: e.id, label: '' });
+      });
+      network.unselectAll();
+      return;
+    }
     const contact = allContacts[params.nodes[0]];
     if (contact) openPanel(contact);
   });
+
+  network.on('hoverNode', () => { document.getElementById('graph').style.cursor = 'pointer'; });
+  network.on('blurNode',  () => { document.getElementById('graph').style.cursor = 'default'; });
 
   document.getElementById('loading').style.display = 'none';
 }
@@ -596,8 +696,25 @@ function openPanel(contact) {
   body.appendChild(textField('Nickname', 'nickname', (contact.nicknames||[])[0]||'', 'e.g. Johnny'));
   body.appendChild(textField('Email(s)', 'emails', (contact.emails||[]).join(', '), 'email1@x.com, email2@x.com'));
   body.appendChild(textField('Phone(s)', 'phones', (contact.phones||[]).map(p=>p.number).join(', '), '+1 555 000 0000'));
-  body.appendChild(textField('Birthday', 'birthday', contact.birthday||'', 'YYYY-MM-DD'));
   body.appendChild(textareaField('Notes / Bio', 'bio', contact.bio||''));
+
+  // ── Significant Dates section
+  body.appendChild(sectionTitle('Significant Dates'));
+  const datesContainer = document.createElement('div');
+  datesContainer.id = 'dates-container';
+  datesContainer.style.display = 'flex'; datesContainer.style.flexDirection = 'column'; datesContainer.style.gap = '8px';
+  // Birthday always first
+  datesContainer.appendChild(dateRow({ type: 'birthday', date: contact.birthday||'' }));
+  // Other events
+  (contact.events||[]).forEach(e => {
+    const dateStr = e.date ? `${e.date.year||'????'}-${String(e.date.month||'??').padStart(2,'0')}-${String(e.date.day||'??').padStart(2,'0')}` : '';
+    datesContainer.appendChild(dateRow({ type: e.type||'anniversary', date: dateStr }));
+  });
+  body.appendChild(datesContainer);
+  const addDateBtn = document.createElement('button');
+  addDateBtn.className = 'add-btn'; addDateBtn.textContent = '+ Add Date';
+  addDateBtn.onclick = () => datesContainer.appendChild(dateRow({ type: 'anniversary', date: '' }));
+  body.appendChild(addDateBtn);
 
   // ── Address section
   body.appendChild(sectionTitle('Addresses'));
@@ -735,6 +852,7 @@ function openPanel(contact) {
     body.appendChild(readOnly([org.title, org.name, org.department].filter(Boolean).join(' · ')));
   }
 
+  clearErrors();
   document.getElementById('panel').classList.add('open');
   document.getElementById('save-btn').disabled = false;
   document.getElementById('status-msg').className = 'status-msg';
@@ -748,7 +866,8 @@ function textField(label, key, value, placeholder='') {
   const g = document.createElement('div'); g.className = 'field-group';
   const l = document.createElement('div'); l.className = 'field-label'; l.textContent = label;
   const i = document.createElement('input'); i.type = 'text'; i.value = value; i.placeholder = placeholder; i.dataset.key = key;
-  g.appendChild(l); g.appendChild(i); return g;
+  const err = document.createElement('div'); err.className = 'field-error'; err.dataset.errorFor = key;
+  g.appendChild(l); g.appendChild(i); g.appendChild(err); return g;
 }
 function textareaField(label, key, value) {
   const g = document.createElement('div'); g.className = 'field-group';
@@ -787,6 +906,47 @@ function addressRow(a) {
   return item;
 }
 
+const DATE_TYPES = ['birthday', 'anniversary', 'other'];
+
+function dateRow(d) {
+  const item = document.createElement('div'); item.className = 'list-item';
+  const isBirthday = d.type === 'birthday';
+
+  // Only non-birthday rows can be removed
+  if (!isBirthday) {
+    const removeBtn = document.createElement('button'); removeBtn.className = 'remove-btn'; removeBtn.textContent = '×';
+    removeBtn.onclick = () => item.remove();
+    item.appendChild(removeBtn);
+  }
+
+  const row = document.createElement('div'); row.className = 'list-item-row';
+
+  // Type selector
+  const sel = document.createElement('select'); sel.dataset.dateField = 'type';
+  DATE_TYPES.forEach(t => {
+    const o = document.createElement('option'); o.value = t; o.textContent = t.charAt(0).toUpperCase() + t.slice(1);
+    if (t === (d.type||'anniversary')) o.selected = true;
+    sel.appendChild(o);
+  });
+  if (isBirthday) { sel.disabled = true; sel.style.opacity = '0.6'; }
+
+  // Date input
+  const inp = document.createElement('input'); inp.type = 'text';
+  inp.placeholder = 'YYYY-MM-DD or ????-MM-DD';
+  inp.value = d.date || '';
+  inp.dataset.dateField = 'date';
+  if (isBirthday) inp.dataset.isBirthday = 'true';
+
+  row.appendChild(sel); row.appendChild(inp); item.appendChild(row);
+
+  // Inline error
+  const err = document.createElement('div'); err.className = 'field-error'; err.dataset.errorFor = 'date-' + Math.random();
+  item.appendChild(err);
+  item._dateErr = err;
+
+  return item;
+}
+
 function relationRow(r) {
   const item = document.createElement('div'); item.className = 'list-item';
   const removeBtn = document.createElement('button'); removeBtn.className = 'remove-btn'; removeBtn.textContent = '×';
@@ -794,10 +954,60 @@ function relationRow(r) {
   item.appendChild(removeBtn);
 
   const row = document.createElement('div'); row.className = 'list-item-row';
-  const nameInp = document.createElement('input'); nameInp.type = 'text'; nameInp.placeholder = 'Name'; nameInp.value = r.name||''; nameInp.dataset.relField = 'name';
+
+  // Name input with autocomplete
+  const nameWrap = document.createElement('div'); nameWrap.className = 'rel-name-wrap';
+  const nameInp = document.createElement('input'); nameInp.type = 'text'; nameInp.placeholder = 'Search contact...';
+  nameInp.value = r.name||''; nameInp.dataset.relField = 'name';
+  const dropdown = document.createElement('div'); dropdown.className = 'rel-autocomplete';
+  nameWrap.appendChild(nameInp); nameWrap.appendChild(dropdown);
+
+  let acIndex = -1;
+
+  function showSuggestions(query) {
+    dropdown.innerHTML = ''; acIndex = -1;
+    if (!query.trim()) { dropdown.style.display = 'none'; return; }
+    const q = query.toLowerCase();
+    const matches = Object.values(allContacts)
+      .filter(c => c.name.toLowerCase().split(/\s+/).some(w => w.startsWith(q)))
+      .slice(0, 8);
+    if (!matches.length) { dropdown.style.display = 'none'; return; }
+    matches.forEach((c, i) => {
+      const opt = document.createElement('div'); opt.className = 'rel-autocomplete-item';
+      opt.dataset.idx = i;
+      const idx = c.name.toLowerCase().indexOf(q);
+      opt.innerHTML = idx >= 0
+        ? c.name.slice(0,idx) + '<mark>' + c.name.slice(idx, idx+q.length) + '</mark>' + c.name.slice(idx+q.length)
+        : c.name;
+      opt.onmousedown = (e) => {
+        e.preventDefault();
+        nameInp.value = c.name;
+        dropdown.style.display = 'none';
+      };
+      dropdown.appendChild(opt);
+    });
+    dropdown.style.display = 'block';
+  }
+
+  function setAcActive(idx) {
+    const items = dropdown.querySelectorAll('.rel-autocomplete-item');
+    items.forEach((el, i) => el.classList.toggle('active', i === idx));
+    if (items[idx]) items[idx].scrollIntoView({ block: 'nearest' });
+  }
+
+  nameInp.addEventListener('input', e => showSuggestions(e.target.value));
+  nameInp.addEventListener('keydown', e => {
+    const items = dropdown.querySelectorAll('.rel-autocomplete-item');
+    if (e.key === 'ArrowDown') { e.preventDefault(); acIndex = Math.min(acIndex+1, items.length-1); setAcActive(acIndex); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); acIndex = Math.max(acIndex-1, 0); setAcActive(acIndex); }
+    else if (e.key === 'Enter' && acIndex >= 0) { e.preventDefault(); nameInp.value = items[acIndex].textContent; dropdown.style.display = 'none'; acIndex = -1; }
+    else if (e.key === 'Escape') { dropdown.style.display = 'none'; acIndex = -1; }
+  });
+  nameInp.addEventListener('blur', () => setTimeout(() => { dropdown.style.display = 'none'; }, 150));
+
   const sel = document.createElement('select'); sel.dataset.relField = 'type';
   RELATION_TYPES.forEach(t => { const o = document.createElement('option'); o.value = t; o.textContent = t; if (t === (r.type||'other')) o.selected = true; sel.appendChild(o); });
-  row.appendChild(nameInp); row.appendChild(sel); item.appendChild(row);
+  row.appendChild(nameWrap); row.appendChild(sel); item.appendChild(row);
   return item;
 }
 
@@ -807,9 +1017,91 @@ function closePanel() {
   currentContact = null;
 }
 
+function clearErrors() {
+  document.querySelectorAll('.field-error').forEach(e => { e.textContent = ''; e.classList.remove('visible'); });
+  document.querySelectorAll('.invalid').forEach(e => e.classList.remove('invalid'));
+}
+
+function showFieldError(key, msg) {
+  const err = document.querySelector(`.field-error[data-error-for="${key}"]`);
+  const inp = document.querySelector(`[data-key="${key}"]`);
+  if (err) { err.textContent = msg; err.classList.add('visible'); }
+  if (inp) inp.classList.add('invalid');
+}
+
+function validateFields() {
+  clearErrors();
+  let valid = true;
+
+  // Name required
+  const nameEl = document.querySelector('[data-key="name"]');
+  if (nameEl && !nameEl.value.trim()) {
+    showFieldError('name', 'Name is required');
+    valid = false;
+  }
+
+  // Email format
+  const emailEl = document.querySelector('[data-key="emails"]');
+  if (emailEl && emailEl.value.trim()) {
+    const emails = emailEl.value.split(',').map(s => s.trim()).filter(Boolean);
+    const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const bad = emails.filter(e => !emailRe.test(e));
+    if (bad.length) {
+      showFieldError('emails', `Invalid email${bad.length > 1 ? 's' : ''}: ${bad.join(', ')}`);
+      valid = false;
+    }
+  }
+
+  // Significant dates validation
+  const dateRe = /^(\d{4}|\?{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+  document.querySelectorAll('#dates-container .list-item').forEach(item => {
+    const dateEl = item.querySelector('[data-date-field="date"]');
+    if (dateEl && dateEl.value.trim() && !dateRe.test(dateEl.value.trim())) {
+      dateEl.classList.add('invalid');
+      if (item._dateErr) { item._dateErr.textContent = 'Use YYYY-MM-DD or ????-MM-DD'; item._dateErr.classList.add('visible'); }
+      valid = false;
+    }
+  });
+
+  // Phone — basic check, no letters
+  const phoneEl = document.querySelector('[data-key="phones"]');
+  if (phoneEl && phoneEl.value.trim()) {
+    const phones = phoneEl.value.split(',').map(s => s.trim()).filter(Boolean);
+    const bad = phones.filter(p => /[a-zA-Z]/.test(p));
+    if (bad.length) {
+      showFieldError('phones', `Phone numbers can't contain letters`);
+      valid = false;
+    }
+  }
+
+  // Relationships — name must not be empty if row exists
+  let relValid = true;
+  document.querySelectorAll('#rel-container .list-item').forEach(item => {
+    const nameInp = item.querySelector('[data-rel-field="name"]');
+    if (nameInp && !nameInp.value.trim()) {
+      nameInp.classList.add('invalid');
+      relValid = false;
+    }
+  });
+  if (!relValid) {
+    const msg = document.getElementById('status-msg');
+    msg.textContent = 'Relationship name cannot be empty — fill it in or remove the row';
+    msg.className = 'status-msg error'; msg.style.display = 'block';
+    valid = false;
+  }
+
+  return valid;
+}
+
 async function saveContact() {
   if (!currentContact) return;
   const btn = document.getElementById('save-btn');
+
+  if (!validateFields()) {
+    btn.disabled = false; btn.textContent = 'Save Changes';
+    return;
+  }
+
   btn.disabled = true; btn.textContent = 'Saving...';
 
   const payload = { resourceName: currentContact.resourceName };
@@ -854,6 +1146,29 @@ async function saveContact() {
   const oldRelations = (currentContact.relations||[]).map(r=>({name:r.name||'',type:r.type||'other'}));
   if (JSON.stringify(newRelations) !== JSON.stringify(oldRelations)) payload.relations = newRelations;
 
+  // Significant dates — birthday + events
+  let birthdayVal = null;
+  const newEvents = [];
+  document.querySelectorAll('#dates-container .list-item').forEach(item => {
+    const typeEl = item.querySelector('[data-date-field="type"]');
+    const dateEl = item.querySelector('[data-date-field="date"]');
+    if (!typeEl || !dateEl) return;
+    const type = typeEl.value;
+    const dateStr = dateEl.value.trim();
+    if (type === 'birthday') {
+      birthdayVal = dateStr;
+    } else if (dateStr) {
+      newEvents.push({ type, date: dateStr });
+    }
+  });
+  // Only include if changed
+  if (birthdayVal !== null && birthdayVal !== (currentContact.birthday||'')) payload.birthday = birthdayVal || '';
+  const oldEvents = (currentContact.events||[]).map(e => ({
+    type: e.type||'anniversary',
+    date: e.date ? `${e.date.year||'????'}-${String(e.date.month||'??').padStart(2,'0')}-${String(e.date.day||'??').padStart(2,'0')}` : ''
+  }));
+  if (JSON.stringify(newEvents) !== JSON.stringify(oldEvents)) payload.events = newEvents;
+
   // Groups — only send if changed
   const newGroups = [];
   document.querySelectorAll('#group-list input[type="checkbox"]:checked').forEach(cb => { newGroups.push(cb.value); });
@@ -897,6 +1212,17 @@ async function saveContact() {
 }
 
 window.addEventListener('resize', () => { if (network) network.redraw(); });
+// Live inline validation on change
+document.addEventListener('input', e => {
+  const key = e.target.dataset.key;
+  if (!key) return;
+  const err = document.querySelector(`.field-error[data-error-for="${key}"]`);
+  if (err && err.classList.contains('visible')) {
+    // Re-validate just this field on change
+    validateFields();
+  }
+});
+
 document.getElementById('close-panel').addEventListener('click', closePanel);
 document.getElementById('cancel-btn').addEventListener('click', closePanel);
 document.getElementById('save-btn').addEventListener('click', saveContact);
