@@ -1,7 +1,7 @@
 # Contact Map
 
 An interactive graph visualization of your Google Contacts and groups. View, explore, and edit your contacts directly from a graph interface that runs locally on your machine.
-
+![Contact Map Screenshot](screenshot.png)
 ---
 
 ## Features
