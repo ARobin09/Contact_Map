@@ -44,12 +44,23 @@ PERSON_FIELDS = ",".join([
     "externalIds", "userDefined",
 ])
 
+# Built-in Google system groups we never want to show
+SYSTEM_GROUP_BLOCKLIST = {"myContacts", "all", "blocked", "chatBuddies", "coworkers"}
+
 def fetch_groups():
     groups = {}
     result = service.contactGroups().list().execute()
     for g in result.get("contactGroups", []):
-        if g.get("groupType") == "USER_CONTACT_GROUP":
-            groups[g["resourceName"]] = g["name"]
+        name        = g.get("name", "")
+        gtype       = g.get("groupType", "")
+        member_count = g.get("memberCount", 0)
+        is_user     = gtype == "USER_CONTACT_GROUP"
+        is_system   = gtype == "SYSTEM_CONTACT_GROUP" and name not in SYSTEM_GROUP_BLOCKLIST
+        if (is_user or is_system) and member_count > 0:
+            groups[g["resourceName"]] = {
+                "name": name,
+                "system": gtype == "SYSTEM_CONTACT_GROUP",
+            }
     return groups
 
 def parse_contact(person, groups):
@@ -77,7 +88,7 @@ def parse_contact(person, groups):
     im_clients = [{"username": i.get("username"), "protocol": i.get("protocol", i.get("formattedProtocol",""))} for i in person.get("imClients",[])]
     custom     = [{"key": u.get("key"), "value": u.get("value")} for u in person.get("userDefined",[])]
     group_rns  = [m["contactGroupMembership"]["contactGroupResourceName"] for m in person.get("memberships",[]) if "contactGroupMembership" in m]
-    group_names= [groups.get(g, g) for g in group_rns]
+    group_names= [groups[g]["name"] if g in groups else g for g in group_rns]
 
     return {
         "resourceName": person.get("resourceName"),
@@ -111,7 +122,11 @@ def fetch_contacts(groups):
 def api_data():
     groups   = fetch_groups()
     contacts = fetch_contacts(groups)
-    return jsonify({"groups": groups, "contacts": contacts})
+    # Serialize groups for frontend: { resourceName: {name, system} }
+    resp = jsonify({"groups": groups, "contacts": contacts})
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 @app.route("/api/update", methods=["POST"])
 def api_update():
@@ -194,20 +209,27 @@ def api_update():
                     if "contactGroupMembership" in m
                 )
                 new_groups = set(data["groups"])
+                group_errors = []
                 for grn in new_groups - current_groups:
                     try:
                         service.contactGroups().members().modify(
                             resourceName=grn, body={"resourceNamesToAdd": [rn]}
                         ).execute()
+                        print(f"Added to group {grn}")
                     except Exception as e:
                         print(f"Error adding to group {grn}: {e}")
+                        group_errors.append(str(e))
                 for grn in current_groups - new_groups:
                     try:
                         service.contactGroups().members().modify(
                             resourceName=grn, body={"resourceNamesToRemove": [rn]}
                         ).execute()
+                        print(f"Removed from group {grn}")
                     except Exception as e:
                         print(f"Error removing from group {grn}: {e}")
+                        group_errors.append(str(e))
+                if group_errors:
+                    return jsonify({"error": "Group update failed: " + group_errors[0]}), 500
 
             if fields:
                 service.people().updateContact(
@@ -407,8 +429,8 @@ async function loadGraph() {
   const nodes = new vis.DataSet();
   const edges = new vis.DataSet();
 
-  Object.entries(allGroups).forEach(([rn, name]) => {
-    nodes.add({ id: rn, label: name, type: 'group',
+  Object.entries(allGroups).forEach(([rn, g]) => {
+    nodes.add({ id: rn, label: g.name, type: 'group',
       color: { background: '#1f1529', border: '#e85b8d', highlight: { background: '#2a1a38', border: '#e85b8d' } },
       font: { color: '#e85b8d', size: 13, face: 'DM Mono' }, shape: 'dot', size: 22, borderWidth: 2 });
   });
@@ -482,7 +504,9 @@ function openPanel(contact) {
   groupList.className = 'group-list'; groupList.id = 'group-list';
   function renderGroupList() {
     groupList.innerHTML = '';
-    Object.entries(allGroups).forEach(([rn, gname]) => {
+    Object.entries(allGroups).forEach(([rn, g]) => {
+      const gname  = g.name;
+      const system = g.system;
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;gap:8px;';
       // Checkbox + label
@@ -490,26 +514,34 @@ function openPanel(contact) {
       const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = rn;
       cb.checked = (currentContact.groups||[]).includes(rn);
       label.appendChild(cb);
-      label.appendChild(document.createTextNode(gname));
-      // Delete group button
-      const delBtn = document.createElement('button');
-      delBtn.textContent = '×'; delBtn.title = 'Delete this group';
-      delBtn.style.cssText = 'background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:0 4px;flex:none;';
-      delBtn.onmouseover = () => delBtn.style.color = 'var(--danger)';
-      delBtn.onmouseout  = () => delBtn.style.color = 'var(--muted)';
-      delBtn.onclick = async () => {
-        if (!confirm(`Delete group "${gname}"? This will remove it from all contacts.`)) return;
-        const res = await fetch(`${API}/delete_group`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resourceName: rn})});
-        const d = await res.json();
-        if (d.success) {
-          delete allGroups[rn];
-          // Remove from current contact's groups too
-          currentContact.groups = (currentContact.groups||[]).filter(g => g !== rn);
-          currentContact.groupNames = (currentContact.groupNames||[]).filter(n => n !== gname);
-          renderGroupList();
-        } else { alert('Failed to delete group: ' + d.error); }
-      };
-      row.appendChild(label); row.appendChild(delBtn);
+      const nameSpan = document.createTextNode(gname);
+      label.appendChild(nameSpan);
+      // Show a small lock icon for system groups instead of delete button
+      if (system) {
+        const lock = document.createElement('span');
+        lock.textContent = '🔒'; lock.title = 'Samsung/system group — cannot be deleted via app';
+        lock.style.cssText = 'font-size:11px;opacity:0.5;flex:none;';
+        row.appendChild(label); row.appendChild(lock);
+      } else {
+        // Delete group button — only for user-created groups
+        const delBtn = document.createElement('button');
+        delBtn.textContent = '×'; delBtn.title = 'Delete this group';
+        delBtn.style.cssText = 'background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:0 4px;flex:none;';
+        delBtn.onmouseover = () => delBtn.style.color = 'var(--danger)';
+        delBtn.onmouseout  = () => delBtn.style.color = 'var(--muted)';
+        delBtn.onclick = async () => {
+          if (!confirm(`Delete group "${gname}"? This will remove it from all contacts.`)) return;
+          const res = await fetch(`${API}/delete_group`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resourceName: rn})});
+          const d = await res.json();
+          if (d.success) {
+            delete allGroups[rn];
+            currentContact.groups = (currentContact.groups||[]).filter(x => x !== rn);
+            currentContact.groupNames = (currentContact.groupNames||[]).filter(n => n !== gname);
+            renderGroupList();
+          } else { alert('Failed to delete group: ' + d.error); }
+        };
+        row.appendChild(label); row.appendChild(delBtn);
+      }
       groupList.appendChild(row);
     });
   }
