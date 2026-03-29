@@ -430,6 +430,10 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   <div class="legend">
     <div class="legend-item"><div class="legend-dot" style="background:#5b8dee"></div><span>person</span></div>
     <div class="legend-item"><div class="legend-dot" style="background:#e85b8d"></div><span>group</span></div>
+    <div class="legend-item">
+      <svg width="20" height="10"><line x1="0" y1="5" x2="20" y2="5" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4,4"/></svg>
+      <span>relationship</span>
+    </div>
   </div>
 </header>
 
@@ -483,7 +487,31 @@ async function reloadGraph() {
     c.groups.forEach(grn => {
       if (allGroups[grn] && (allGroups[grn].memberCount||0) > 0) {
         edges.add({ from: c.resourceName, to: grn,
-          color: { color: '#252a38', highlight: '#5b8dee', opacity: 0.6 }, width: 1.5, smooth: { type: 'continuous' } });
+          color: { color: '#3d6fd4', highlight: '#7aabff', opacity: 0.9 }, width: 2.5, smooth: { type: 'continuous' } });
+      }
+    });
+    // Relationship edges — dotted lines between contacts
+    (c.relations||[]).forEach(r => {
+      if (!r.name) return;
+      // Find the contact whose name matches the relation
+      const relContact = Object.values(allContacts).find(x =>
+        x.name.toLowerCase() === r.name.toLowerCase()
+      );
+      if (relContact) {
+        // Use a unique edge id to avoid duplicates
+        const edgeId = [c.resourceName, relContact.resourceName].sort().join('--rel--');
+        if (!edges.get(edgeId)) {
+          edges.add({
+            id: edgeId,
+            from: c.resourceName,
+            to: relContact.resourceName,
+            color: { color: '#f59e0b', highlight: '#fde68a', opacity: 0.9 },
+            width: 2.5,
+            dashes: [5, 5],
+            smooth: { type: 'curvedCW', roundness: 0.2 },
+            title: r.type,
+          });
+        }
       }
     });
   });
@@ -513,7 +541,31 @@ async function loadGraph() {
       font: { color: '#e2e8f8', size: 12, face: 'DM Sans' }, shape: 'dot', size: 14, borderWidth: 1.5 });
     c.groups.forEach(grn => {
       if (allGroups[grn]) edges.add({ from: c.resourceName, to: grn,
-        color: { color: '#252a38', highlight: '#5b8dee', opacity: 0.6 }, width: 1.5, smooth: { type: 'continuous' } });
+        color: { color: '#3d6fd4', highlight: '#7aabff', opacity: 0.9 }, width: 2.5, smooth: { type: 'continuous' } });
+    });
+    // Relationship edges — dotted lines between contacts
+    (c.relations||[]).forEach(r => {
+      if (!r.name) return;
+      // Find the contact whose name matches the relation
+      const relContact = Object.values(allContacts).find(x =>
+        x.name.toLowerCase() === r.name.toLowerCase()
+      );
+      if (relContact) {
+        // Use a unique edge id to avoid duplicates
+        const edgeId = [c.resourceName, relContact.resourceName].sort().join('--rel--');
+        if (!edges.get(edgeId)) {
+          edges.add({
+            id: edgeId,
+            from: c.resourceName,
+            to: relContact.resourceName,
+            color: { color: '#f59e0b', highlight: '#fde68a', opacity: 0.9 },
+            width: 2.5,
+            dashes: [5, 5],
+            smooth: { type: 'curvedCW', roundness: 0.2 },
+            title: r.type,
+          });
+        }
+      }
     });
   });
 
