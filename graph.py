@@ -45,23 +45,16 @@ PERSON_FIELDS = ",".join([
 ])
 
 # Built-in Google system groups we never want to show
-# Built-in Google system groups that should never appear in the graph
-SYSTEM_GROUP_BLOCKLIST = {"myContacts", "all", "blocked"}
-
 def fetch_groups():
     groups = {}
     result = service.contactGroups().list().execute()
     for g in result.get("contactGroups", []):
-        name        = g.get("name", "")
-        gtype       = g.get("groupType", "")
-        member_count = g.get("memberCount", 0)
-        is_user     = gtype == "USER_CONTACT_GROUP"
-        is_system   = gtype == "SYSTEM_CONTACT_GROUP" and name not in SYSTEM_GROUP_BLOCKLIST
-        if (is_user or is_system) and member_count > 0:
-            groups[g["resourceName"]] = {
-                "name": name,
-                "system": gtype == "SYSTEM_CONTACT_GROUP",
-            }
+        if g.get("groupType") != "USER_CONTACT_GROUP":
+            continue
+        groups[g["resourceName"]] = {
+            "name": g.get("name", ""),
+            "memberCount": g.get("memberCount", 0),
+        }
     return groups
 
 def parse_contact(person, groups):
@@ -157,6 +150,10 @@ def api_update():
         if "bio" in data:
             body["biographies"] = [{"value": data["bio"], "contentType": "TEXT_PLAIN"}]
             fields.append("biographies")
+
+        if "nickname" in data:
+            body["nicknames"] = [{"value": data["nickname"]}] if data["nickname"] else []
+            fields.append("nicknames")
 
         if "birthday" in data and data["birthday"]:
             parts = data["birthday"].split("-")
@@ -466,6 +463,7 @@ async function loadGraph() {
   const edges = new vis.DataSet();
 
   Object.entries(allGroups).forEach(([rn, g]) => {
+    if ((g.memberCount||0) === 0) return; // empty groups don't appear in graph
     nodes.add({ id: rn, label: g.name, type: 'group',
       color: { background: '#1f1529', border: '#e85b8d', highlight: { background: '#2a1a38', border: '#e85b8d' } },
       font: { color: '#e85b8d', size: 13, face: 'DM Mono' }, shape: 'dot', size: 22, borderWidth: 2 });
@@ -505,6 +503,7 @@ function openPanel(contact) {
   // ── Basic fields
   body.appendChild(sectionTitle('Basic Info'));
   body.appendChild(textField('Full Name', 'name', contact.name));
+  body.appendChild(textField('Nickname', 'nickname', (contact.nicknames||[])[0]||'', 'e.g. Johnny'));
   body.appendChild(textField('Email(s)', 'emails', (contact.emails||[]).join(', '), 'email1@x.com, email2@x.com'));
   body.appendChild(textField('Phone(s)', 'phones', (contact.phones||[]).map(p=>p.number).join(', '), '+1 555 000 0000'));
   body.appendChild(textField('Birthday', 'birthday', contact.birthday||'', 'YYYY-MM-DD'));
@@ -540,46 +539,55 @@ function openPanel(contact) {
   groupList.className = 'group-list'; groupList.id = 'group-list';
   function renderGroupList() {
     groupList.innerHTML = '';
-    Object.entries(allGroups).forEach(([rn, g]) => {
-      const gname  = g.name;
-      const system = g.system;
+    // Separate empty vs populated groups
+    const populated = Object.entries(allGroups).filter(([,g]) => (g.memberCount||0) > 0);
+    const empty     = Object.entries(allGroups).filter(([,g]) => (g.memberCount||0) === 0);
+
+    function makeRow(rn, g) {
+      const gname = g.name;
+      const count = g.memberCount || 0;
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;gap:8px;';
-      // Checkbox + label
       const label = document.createElement('label'); label.className = 'group-check'; label.style.flex = '1';
       const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = rn;
       cb.checked = (currentContact.groups||[]).includes(rn);
       label.appendChild(cb);
-      const nameSpan = document.createTextNode(gname);
-      label.appendChild(nameSpan);
-      // Show a small lock icon for system groups instead of delete button
-      if (system) {
-        const lock = document.createElement('span');
-        lock.textContent = '🔒'; lock.title = 'Samsung/system group — cannot be deleted via app';
-        lock.style.cssText = 'font-size:11px;opacity:0.5;flex:none;';
-        row.appendChild(label); row.appendChild(lock);
-      } else {
-        // Delete group button — only for user-created groups
-        const delBtn = document.createElement('button');
-        delBtn.textContent = '×'; delBtn.title = 'Delete this group';
-        delBtn.style.cssText = 'background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:0 4px;flex:none;';
-        delBtn.onmouseover = () => delBtn.style.color = 'var(--danger)';
-        delBtn.onmouseout  = () => delBtn.style.color = 'var(--muted)';
-        delBtn.onclick = async () => {
-          if (!confirm(`Delete group "${gname}"? This will remove it from all contacts.`)) return;
-          const res = await fetch(`${API}/delete_group`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resourceName: rn})});
-          const d = await res.json();
-          if (d.success) {
-            delete allGroups[rn];
-            currentContact.groups = (currentContact.groups||[]).filter(x => x !== rn);
-            currentContact.groupNames = (currentContact.groupNames||[]).filter(n => n !== gname);
-            renderGroupList();
-          } else { alert('Failed to delete group: ' + d.error); }
-        };
-        row.appendChild(label); row.appendChild(delBtn);
-      }
-      groupList.appendChild(row);
-    });
+      label.appendChild(document.createTextNode(gname));
+      // Member count badge
+      const badge = document.createElement('span');
+      badge.textContent = count === 0 ? 'empty' : count;
+      badge.style.cssText = count === 0
+        ? 'font-family:DM Mono,monospace;font-size:10px;color:var(--danger);opacity:0.8;flex:none;'
+        : 'font-family:DM Mono,monospace;font-size:10px;color:var(--muted);flex:none;';
+      const delBtn = document.createElement('button');
+      delBtn.textContent = '×'; delBtn.title = 'Delete this group';
+      delBtn.style.cssText = 'background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:0 4px;flex:none;';
+      delBtn.onmouseover = () => delBtn.style.color = 'var(--danger)';
+      delBtn.onmouseout  = () => delBtn.style.color = 'var(--muted)';
+      delBtn.onclick = async () => {
+        if (!confirm(`Delete group "${gname}"? This will remove it from all contacts.`)) return;
+        const res = await fetch(`${API}/delete_group`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resourceName: rn})});
+        const d = await res.json();
+        if (d.success) {
+          delete allGroups[rn];
+          currentContact.groups = (currentContact.groups||[]).filter(x => x !== rn);
+          currentContact.groupNames = (currentContact.groupNames||[]).filter(n => n !== gname);
+          renderGroupList();
+        } else { alert('Failed to delete group: ' + d.error); }
+      };
+      row.appendChild(label); row.appendChild(badge); row.appendChild(delBtn);
+      return row;
+    }
+
+    populated.forEach(([rn, g]) => groupList.appendChild(makeRow(rn, g)));
+
+    if (empty.length) {
+      const emptyHeader = document.createElement('div');
+      emptyHeader.style.cssText = 'font-family:DM Mono,monospace;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);';
+      emptyHeader.textContent = 'Empty groups';
+      groupList.appendChild(emptyHeader);
+      empty.forEach(([rn, g]) => groupList.appendChild(makeRow(rn, g)));
+    }
   }
   renderGroupList();
   body.appendChild(groupList);
@@ -604,7 +612,23 @@ function openPanel(contact) {
     const res = await fetch(`${API}/create_group`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
     const d = await res.json();
     if (d.success) {
-      allGroups[d.resourceName] = d.name;
+      // Store with correct shape {name, system}
+      allGroups[d.resourceName] = { name: d.name, memberCount: 1 };
+      // Auto-add the current contact to the new group
+      if (currentContact) {
+        try {
+          await fetch(`${API}/update`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              resourceName: currentContact.resourceName,
+              groups: [...(currentContact.groups||[]), d.resourceName]
+            })
+          });
+          currentContact.groups = [...(currentContact.groups||[]), d.resourceName];
+          currentContact.groupNames = [...(currentContact.groupNames||[]), d.name];
+        } catch(e) { console.error('Failed to add contact to new group', e); }
+      }
       newGroupInput.value = '';
       renderGroupList();
     } else { alert('Failed to create group: ' + d.error); }
@@ -707,6 +731,10 @@ async function saveContact() {
       const newVal = el.value.split(',').map(s=>({number:s.trim(),type:'mobile'})).filter(p=>p.number);
       const oldVal = (currentContact.phones||[]).map(p=>({number:p.number,type:'mobile'}));
       if (JSON.stringify(newVal) !== JSON.stringify(oldVal)) payload.phones = newVal;
+    } else if (key === 'nickname') {
+      const newVal = el.value.trim();
+      const oldVal = (currentContact.nicknames||[])[0] || '';
+      if (newVal !== oldVal) payload.nickname = newVal;
     } else {
       const newVal = el.value.trim();
       if (newVal !== (currentContact[key]||'')) payload[key] = newVal;
@@ -812,6 +840,7 @@ function doSearch(query) {
   }
   const matches = Object.values(allContacts).filter(c =>
     matchesWordStart(c.name) ||
+    (c.nicknames||[]).some(n => matchesWordStart(n)) ||
     (c.emails||[]).some(e => matchesWordStart(e)) ||
     (c.phones||[]).some(p => p.number.includes(q))
   ).slice(0, 12);
