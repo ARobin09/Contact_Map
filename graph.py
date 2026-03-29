@@ -315,11 +315,11 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   .legend-item { display: flex; align-items: center; gap: 6px; }
   .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
 
-  .main { display: flex; flex: 1; overflow: hidden; }
-  #graph { flex: 1; background: var(--bg); }
+  .main { display: flex; flex: 1; overflow: hidden; position: relative; }
+  #graph { flex: 1; background: var(--bg); width: 100%; }
 
   /* Panel */
-  #panel { width: 360px; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; transform: translateX(100%); transition: transform 0.3s cubic-bezier(0.4,0,0.2,1); flex-shrink: 0; }
+  #panel { width: 360px; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; transform: translateX(100%); transition: transform 0.3s cubic-bezier(0.4,0,0.2,1); flex-shrink: 0; position: absolute; right: 0; top: 0; bottom: 0; z-index: 10; }
   #panel.open { transform: translateX(0); }
 
   .panel-header { padding: 18px 20px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
@@ -453,6 +453,38 @@ const RELATION_TYPES = ['spouse','child','mother','father','parent','brother','s
 const ADDRESS_TYPES  = ['home','work','other'];
 
 // ── Load & build graph ───────────────────────────────────────────────────────
+async function reloadGraph() {
+  const res  = await fetch(`${API}/data`);
+  const data = await res.json();
+  allGroups  = data.groups;
+  allContacts = {};
+  data.contacts.forEach(c => allContacts[c.resourceName] = c);
+
+  const nodes = new vis.DataSet();
+  const edges = new vis.DataSet();
+
+  Object.entries(allGroups).forEach(([rn, g]) => {
+    if ((g.memberCount||0) === 0) return;
+    nodes.add({ id: rn, label: g.name, type: 'group',
+      color: { background: '#1f1529', border: '#e85b8d', highlight: { background: '#2a1a38', border: '#e85b8d' } },
+      font: { color: '#e85b8d', size: 13, face: 'DM Mono' }, shape: 'dot', size: 22, borderWidth: 2 });
+  });
+
+  data.contacts.forEach(c => {
+    nodes.add({ id: c.resourceName, label: c.name, type: 'person',
+      color: { background: '#111a2e', border: '#5b8dee', highlight: { background: '#162240', border: '#5b8dee' } },
+      font: { color: '#e2e8f8', size: 12, face: 'DM Sans' }, shape: 'dot', size: 14, borderWidth: 1.5 });
+    c.groups.forEach(grn => {
+      if (allGroups[grn] && (allGroups[grn].memberCount||0) > 0) {
+        edges.add({ from: c.resourceName, to: grn,
+          color: { color: '#252a38', highlight: '#5b8dee', opacity: 0.6 }, width: 1.5, smooth: { type: 'continuous' } });
+      }
+    });
+  });
+
+  network.setData({ nodes, edges });
+}
+
 async function loadGraph() {
   const res  = await fetch(`${API}/data`);
   const data = await res.json();
@@ -712,7 +744,10 @@ function relationRow(r) {
 }
 
 // ── Collect & save ────────────────────────────────────────────────────────────
-function closePanel() { document.getElementById('panel').classList.remove('open'); currentContact = null; }
+function closePanel() {
+  document.getElementById('panel').classList.remove('open');
+  currentContact = null;
+}
 
 async function saveContact() {
   if (!currentContact) return;
@@ -779,9 +814,17 @@ async function saveContact() {
     const data = await res.json();
     const msg  = document.getElementById('status-msg');
     if (data.success) {
-      msg.textContent = '✓ Saved to Google Contacts';
+      msg.textContent = '✓ Saved — reloading graph...';
       msg.className = 'status-msg success';
       Object.assign(allContacts[currentContact.resourceName], payload);
+      const savedContact = allContacts[currentContact.resourceName];
+      setTimeout(async () => {
+        await reloadGraph();
+        // Re-open the panel for the same contact with fresh data
+        if (allContacts[savedContact.resourceName]) {
+          openPanel(allContacts[savedContact.resourceName]);
+        }
+      }, 800);
     } else {
       msg.textContent = data.error || 'Something went wrong';
       msg.className = 'status-msg error';
@@ -795,6 +838,7 @@ async function saveContact() {
   btn.disabled = false; btn.textContent = 'Save Changes';
 }
 
+window.addEventListener('resize', () => { if (network) network.redraw(); });
 document.getElementById('close-panel').addEventListener('click', closePanel);
 document.getElementById('cancel-btn').addEventListener('click', closePanel);
 document.getElementById('save-btn').addEventListener('click', saveContact);
