@@ -227,6 +227,37 @@ def api_update():
     return jsonify({"error": f"Update failed: {last_error}"}), 500
 
 
+@app.route("/api/create_group", methods=["POST"])
+def api_create_group():
+    data = request.json
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "Group name is required"}), 400
+    try:
+        result = service.contactGroups().create(
+            body={"contactGroup": {"name": name}}
+        ).execute()
+        return jsonify({
+            "success": True,
+            "resourceName": result["resourceName"],
+            "name": result["name"],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/delete_group", methods=["POST"])
+def api_delete_group():
+    data = request.json
+    rn   = data.get("resourceName", "").strip()
+    if not rn:
+        return jsonify({"error": "resourceName is required"}), 400
+    try:
+        service.contactGroups().delete(resourceName=rn).execute()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ─── Graph HTML ───────────────────────────────────────────────────────────────
 
 GRAPH_HTML = r"""<!DOCTYPE html>
@@ -449,15 +480,71 @@ function openPanel(contact) {
   body.appendChild(sectionTitle('Groups'));
   const groupList = document.createElement('div');
   groupList.className = 'group-list'; groupList.id = 'group-list';
-  Object.entries(allGroups).forEach(([rn, name]) => {
-    const checked = (contact.groups||[]).includes(rn);
-    const label = document.createElement('label'); label.className = 'group-check';
-    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = rn; cb.checked = checked;
-    label.appendChild(cb);
-    label.appendChild(document.createTextNode(name));
-    groupList.appendChild(label);
-  });
+  function renderGroupList() {
+    groupList.innerHTML = '';
+    Object.entries(allGroups).forEach(([rn, gname]) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;';
+      // Checkbox + label
+      const label = document.createElement('label'); label.className = 'group-check'; label.style.flex = '1';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = rn;
+      cb.checked = (currentContact.groups||[]).includes(rn);
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(gname));
+      // Delete group button
+      const delBtn = document.createElement('button');
+      delBtn.textContent = '×'; delBtn.title = 'Delete this group';
+      delBtn.style.cssText = 'background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:0 4px;flex:none;';
+      delBtn.onmouseover = () => delBtn.style.color = 'var(--danger)';
+      delBtn.onmouseout  = () => delBtn.style.color = 'var(--muted)';
+      delBtn.onclick = async () => {
+        if (!confirm(`Delete group "${gname}"? This will remove it from all contacts.`)) return;
+        const res = await fetch(`${API}/delete_group`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({resourceName: rn})});
+        const d = await res.json();
+        if (d.success) {
+          delete allGroups[rn];
+          // Remove from current contact's groups too
+          currentContact.groups = (currentContact.groups||[]).filter(g => g !== rn);
+          currentContact.groupNames = (currentContact.groupNames||[]).filter(n => n !== gname);
+          renderGroupList();
+        } else { alert('Failed to delete group: ' + d.error); }
+      };
+      row.appendChild(label); row.appendChild(delBtn);
+      groupList.appendChild(row);
+    });
+  }
+  renderGroupList();
   body.appendChild(groupList);
+
+  // Create new group inline
+  const newGroupRow = document.createElement('div');
+  newGroupRow.style.cssText = 'display:flex;gap:6px;margin-top:4px;';
+  const newGroupInput = document.createElement('input');
+  newGroupInput.type = 'text'; newGroupInput.placeholder = 'New group name...';
+  newGroupInput.style.cssText = 'flex:1;background:var(--surface2);border:1px dashed var(--border);border-radius:6px;color:var(--text);font-size:13px;padding:7px 10px;outline:none;';
+  newGroupInput.onfocus = () => newGroupInput.style.borderColor = 'var(--accent)';
+  newGroupInput.onblur  = () => newGroupInput.style.borderColor = 'var(--border)';
+  const newGroupBtn = document.createElement('button');
+  newGroupBtn.textContent = '+ Create';
+  newGroupBtn.style.cssText = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--muted);font-family:DM Mono,monospace;font-size:11px;padding:7px 12px;cursor:pointer;white-space:nowrap;';
+  newGroupBtn.onmouseover = () => { newGroupBtn.style.borderColor='var(--accent)'; newGroupBtn.style.color='var(--accent)'; };
+  newGroupBtn.onmouseout  = () => { newGroupBtn.style.borderColor='var(--border)'; newGroupBtn.style.color='var(--muted)'; };
+  newGroupBtn.onclick = async () => {
+    const name = newGroupInput.value.trim();
+    if (!name) return;
+    newGroupBtn.textContent = '...'; newGroupBtn.disabled = true;
+    const res = await fetch(`${API}/create_group`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
+    const d = await res.json();
+    if (d.success) {
+      allGroups[d.resourceName] = d.name;
+      newGroupInput.value = '';
+      renderGroupList();
+    } else { alert('Failed to create group: ' + d.error); }
+    newGroupBtn.textContent = '+ Create'; newGroupBtn.disabled = false;
+  };
+  newGroupInput.onkeydown = e => { if (e.key === 'Enter') newGroupBtn.click(); };
+  newGroupRow.appendChild(newGroupInput); newGroupRow.appendChild(newGroupBtn);
+  body.appendChild(newGroupRow);
 
   // ── Read-only org
   if (contact.organizations?.length) {
@@ -542,33 +629,54 @@ async function saveContact() {
 
   const payload = { resourceName: currentContact.resourceName };
 
-  // Basic fields
+  // Basic fields — only send if changed
   document.querySelectorAll('[data-key]').forEach(el => {
     const key = el.dataset.key;
-    if (key === 'emails') payload.emails = el.value.split(',').map(s=>s.trim()).filter(Boolean);
-    else if (key === 'phones') payload.phones = el.value.split(',').map(s=>({number:s.trim(),type:'mobile'})).filter(p=>p.number);
-    else payload[key] = el.value.trim();
+    if (key === 'emails') {
+      const newVal = el.value.split(',').map(s=>s.trim()).filter(Boolean);
+      if (JSON.stringify(newVal) !== JSON.stringify(currentContact.emails||[])) payload.emails = newVal;
+    } else if (key === 'phones') {
+      const newVal = el.value.split(',').map(s=>({number:s.trim(),type:'mobile'})).filter(p=>p.number);
+      const oldVal = (currentContact.phones||[]).map(p=>({number:p.number,type:'mobile'}));
+      if (JSON.stringify(newVal) !== JSON.stringify(oldVal)) payload.phones = newVal;
+    } else {
+      const newVal = el.value.trim();
+      if (newVal !== (currentContact[key]||'')) payload[key] = newVal;
+    }
   });
 
-  // Addresses
-  payload.addresses = [];
+  // Addresses — only send if changed
+  const newAddresses = [];
   document.querySelectorAll('#addr-container .list-item').forEach(item => {
     const addr = {};
     item.querySelectorAll('[data-addr-field]').forEach(el => { addr[el.dataset.addrField] = el.value.trim(); });
-    if (Object.values(addr).some(v => v)) payload.addresses.push(addr);
+    if (Object.values(addr).some(v => v)) newAddresses.push(addr);
   });
+  const oldAddresses = (currentContact.addresses||[]).map(a=>({street:a.street||'',city:a.city||'',region:a.region||'',country:a.country||'',postalCode:a.postalCode||'',type:a.type||'home'}));
+  if (JSON.stringify(newAddresses) !== JSON.stringify(oldAddresses)) payload.addresses = newAddresses;
 
-  // Relations
-  payload.relations = [];
+  // Relations — only send if changed
+  const newRelations = [];
   document.querySelectorAll('#rel-container .list-item').forEach(item => {
     const rel = {};
     item.querySelectorAll('[data-rel-field]').forEach(el => { rel[el.dataset.relField] = el.value.trim(); });
-    if (rel.name) payload.relations.push(rel);
+    if (rel.name) newRelations.push(rel);
   });
+  const oldRelations = (currentContact.relations||[]).map(r=>({name:r.name||'',type:r.type||'other'}));
+  if (JSON.stringify(newRelations) !== JSON.stringify(oldRelations)) payload.relations = newRelations;
 
-  // Groups
-  payload.groups = [];
-  document.querySelectorAll('#group-list input[type="checkbox"]:checked').forEach(cb => { payload.groups.push(cb.value); });
+  // Groups — only send if changed
+  const newGroups = [];
+  document.querySelectorAll('#group-list input[type="checkbox"]:checked').forEach(cb => { newGroups.push(cb.value); });
+  if (JSON.stringify([...newGroups].sort()) !== JSON.stringify([...(currentContact.groups||[])].sort())) payload.groups = newGroups;
+
+  // Nothing changed — skip the API call entirely
+  if (Object.keys(payload).length <= 1) {
+    const msg = document.getElementById('status-msg');
+    msg.textContent = 'No changes detected'; msg.className = 'status-msg success';
+    btn.disabled = false; btn.textContent = 'Save Changes';
+    return;
+  }
 
   try {
     const res  = await fetch(`${API}/update`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
