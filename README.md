@@ -42,7 +42,7 @@ An interactive graph visualization of your Google Contacts and groups. View, exp
 ### 2. Install Dependencies
 
 ```bash
-pip install google-api-python-client google-auth-oauthlib google-auth-httplib2 flask flask-cors
+pip install -r requirements.txt
 ```
 
 ### 3. Run
