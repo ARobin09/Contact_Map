@@ -66,9 +66,9 @@ def parse_contact(person, groups):
     phones     = [{"number": p["value"], "type": p.get("type","other")} for p in person.get("phoneNumbers",[]) if p.get("value")]
     bday_raw   = person.get("birthdays",[{}])[0].get("date") if person.get("birthdays") else None
     birthday   = f"{bday_raw.get('year','????')}-{bday_raw.get('month','??'):02d}-{bday_raw.get('day','??'):02d}" if bday_raw and isinstance(bday_raw.get('month'), int) else None
-    addresses  = [{"formatted": a.get("formattedValue"), "type": a.get("type","other")} for a in person.get("addresses",[])]
+    addresses  = [{"street": a.get("streetAddress",""), "city": a.get("city",""), "region": a.get("region",""), "country": a.get("country",""), "postalCode": a.get("postalCode",""), "type": a.get("type","home"), "formatted": a.get("formattedValue","")} for a in person.get("addresses",[])]
     orgs       = [{"name": o.get("name"), "title": o.get("title"), "department": o.get("department")} for o in person.get("organizations",[])]
-    relations  = [{"name": r.get("person"), "type": r.get("type", r.get("formattedType","other"))} for r in person.get("relations",[])]
+    relations  = [{"name": r.get("person",""), "type": r.get("type", r.get("formattedType","other"))} for r in person.get("relations",[])]
     urls       = [{"url": u.get("value"), "type": u.get("type","other")} for u in person.get("urls",[])]
     bio        = first(person.get("biographies",[]), "value")
     nicknames  = [n["value"] for n in person.get("nicknames",[]) if n.get("value")]
@@ -120,42 +120,111 @@ def api_update():
     if not rn:
         return jsonify({"error": "Missing resourceName"}), 400
 
-    # Always re-fetch etag before updating
-    person = service.people().get(resourceName=rn, personFields=PERSON_FIELDS).execute()
-    etag   = person.get("etag", "")
+    def build_body(etag):
+        """Build the update body and field list from the request data."""
+        body   = {"etag": etag}
+        fields = []
 
-    body   = {"etag": etag}
-    fields = []
+        if "name" in data:
+            parts = data["name"].strip().split(" ", 1)
+            body["names"] = [{"givenName": parts[0], "familyName": parts[1] if len(parts) > 1 else ""}]
+            fields.append("names")
 
-    if "name" in data:
-        parts = data["name"].strip().split(" ", 1)
-        body["names"] = [{"givenName": parts[0], "familyName": parts[1] if len(parts) > 1 else ""}]
-        fields.append("names")
-    if "emails" in data:
-        body["emailAddresses"] = [{"value": e} for e in data["emails"] if e]
-        fields.append("emailAddresses")
-    if "phones" in data:
-        body["phoneNumbers"] = [{"value": p["number"], "type": p.get("type","other")} for p in data["phones"] if p.get("number")]
-        fields.append("phoneNumbers")
-    if "bio" in data:
-        body["biographies"] = [{"value": data["bio"], "contentType": "TEXT_PLAIN"}]
-        fields.append("biographies")
-    if "birthday" in data and data["birthday"]:
-        parts = data["birthday"].split("-")
-        if len(parts) == 3:
-            body["birthdays"] = [{"date": {"year": int(parts[0]), "month": int(parts[1]), "day": int(parts[2])}}]
-            fields.append("birthdays")
+        if "emails" in data:
+            body["emailAddresses"] = [{"value": e} for e in data["emails"] if e]
+            fields.append("emailAddresses")
 
-    if not fields:
-        return jsonify({"error": "No fields to update"}), 400
+        if "phones" in data:
+            body["phoneNumbers"] = [{"value": p["number"], "type": p.get("type","other")} for p in data["phones"] if p.get("number")]
+            fields.append("phoneNumbers")
 
-    updated = service.people().updateContact(
-        resourceName=rn,
-        updatePersonFields=",".join(fields),
-        body=body,
-    ).execute()
+        if "bio" in data:
+            body["biographies"] = [{"value": data["bio"], "contentType": "TEXT_PLAIN"}]
+            fields.append("biographies")
 
-    return jsonify({"success": True, "resourceName": updated.get("resourceName")})
+        if "birthday" in data and data["birthday"]:
+            parts = data["birthday"].split("-")
+            if len(parts) == 3:
+                try:
+                    body["birthdays"] = [{"date": {"year": int(parts[0]), "month": int(parts[1]), "day": int(parts[2])}}]
+                    fields.append("birthdays")
+                except ValueError:
+                    pass
+
+        if "addresses" in data:
+            body["addresses"] = [
+                {
+                    "streetAddress": a.get("street", ""),
+                    "city": a.get("city", ""),
+                    "region": a.get("region", ""),
+                    "country": a.get("country", ""),
+                    "postalCode": a.get("postalCode", ""),
+                    "type": a.get("type", "home"),
+                }
+                for a in data["addresses"]
+            ]
+            fields.append("addresses")
+
+        if "relations" in data:
+            body["relations"] = [
+                {"person": r["name"], "type": r.get("type", "other")}
+                for r in data["relations"] if r.get("name")
+            ]
+            fields.append("relations")
+
+        return body, fields
+
+    # Retry up to 3 times to handle etag race conditions
+    last_error = None
+    for attempt in range(3):
+        try:
+            # Always fetch a fresh etag right before the update
+            person = service.people().get(resourceName=rn, personFields=PERSON_FIELDS).execute()
+            etag   = person.get("etag", "")
+            body, fields = build_body(etag)
+
+            if not fields and "groups" not in data:
+                return jsonify({"error": "No fields to update"}), 400
+
+            # Handle group membership changes
+            if "groups" in data:
+                current_groups = set(
+                    m["contactGroupMembership"]["contactGroupResourceName"]
+                    for m in person.get("memberships", [])
+                    if "contactGroupMembership" in m
+                )
+                new_groups = set(data["groups"])
+                for grn in new_groups - current_groups:
+                    try:
+                        service.contactGroups().members().modify(
+                            resourceName=grn, body={"resourceNamesToAdd": [rn]}
+                        ).execute()
+                    except Exception as e:
+                        print(f"Error adding to group {grn}: {e}")
+                for grn in current_groups - new_groups:
+                    try:
+                        service.contactGroups().members().modify(
+                            resourceName=grn, body={"resourceNamesToRemove": [rn]}
+                        ).execute()
+                    except Exception as e:
+                        print(f"Error removing from group {grn}: {e}")
+
+            if fields:
+                service.people().updateContact(
+                    resourceName=rn,
+                    updatePersonFields=",".join(fields),
+                    body=body,
+                ).execute()
+
+            return jsonify({"success": True})
+
+        except Exception as e:
+            last_error = str(e)
+            print(f"Update attempt {attempt + 1} failed: {e}")
+            if "etag" not in last_error.lower():
+                break  # Not an etag issue, don't retry
+
+    return jsonify({"error": f"Update failed: {last_error}"}), 500
 
 
 # ─── Graph HTML ───────────────────────────────────────────────────────────────
@@ -181,483 +250,339 @@ GRAPH_HTML = r"""<!DOCTYPE html>
     --accent2: #e85b8d;
     --text: #e2e8f8;
     --muted: #6b7494;
-    --node-person: #5b8dee;
-    --node-group: #e85b8d;
     --success: #3ecf8e;
     --danger: #e85b5b;
   }
 
-  body {
-    font-family: 'DM Sans', sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
+  body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
-  header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 14px 24px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    flex-shrink: 0;
-  }
-
-  header h1 {
-    font-family: 'DM Mono', monospace;
-    font-size: 15px;
-    font-weight: 500;
-    letter-spacing: 0.05em;
-    color: var(--text);
-  }
-
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+  header h1 { font-family: 'DM Mono', monospace; font-size: 15px; font-weight: 500; letter-spacing: 0.05em; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-
-  .legend {
-    display: flex;
-    gap: 16px;
-    margin-left: auto;
-    font-size: 12px;
-    color: var(--muted);
-    font-family: 'DM Mono', monospace;
-  }
+  .legend { display: flex; gap: 16px; margin-left: auto; font-size: 12px; color: var(--muted); font-family: 'DM Mono', monospace; }
   .legend-item { display: flex; align-items: center; gap: 6px; }
   .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
 
-  .main {
-    display: flex;
-    flex: 1;
-    overflow: hidden;
-  }
+  .main { display: flex; flex: 1; overflow: hidden; }
+  #graph { flex: 1; background: var(--bg); }
 
-  #graph {
-    flex: 1;
-    background: var(--bg);
-  }
-
-  /* Side panel */
-  #panel {
-    width: 340px;
-    background: var(--surface);
-    border-left: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    transform: translateX(100%);
-    transition: transform 0.3s cubic-bezier(0.4,0,0.2,1);
-    flex-shrink: 0;
-  }
+  /* Panel */
+  #panel { width: 360px; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; transform: translateX(100%); transition: transform 0.3s cubic-bezier(0.4,0,0.2,1); flex-shrink: 0; }
   #panel.open { transform: translateX(0); }
 
-  .panel-header {
-    padding: 20px 20px 14px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .panel-header h2 {
-    font-family: 'DM Mono', monospace;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-  #close-panel {
-    background: none;
-    border: none;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 18px;
-    line-height: 1;
-    padding: 2px 6px;
-    border-radius: 4px;
-    transition: color 0.2s, background 0.2s;
-  }
+  .panel-header { padding: 18px 20px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .panel-header h2 { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+  #close-panel { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 20px; line-height: 1; padding: 2px 6px; border-radius: 4px; }
   #close-panel:hover { color: var(--text); background: var(--surface2); }
 
-  .panel-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
+  .panel-body { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
   .panel-body::-webkit-scrollbar { width: 4px; }
-  .panel-body::-webkit-scrollbar-track { background: transparent; }
   .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-  .field-group { display: flex; flex-direction: column; gap: 6px; }
-  .field-label {
-    font-family: 'DM Mono', monospace;
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-  }
-  .field-value {
-    font-size: 13px;
-    color: var(--text);
-    line-height: 1.5;
-  }
-  .field-value.muted { color: var(--muted); font-style: italic; }
+  .section-title { font-family: 'DM Mono', monospace; font-size: 10px; font-weight: 500; color: var(--accent); text-transform: uppercase; letter-spacing: 0.12em; padding: 6px 0 2px; border-top: 1px solid var(--border); margin-top: 4px; }
 
-  input[type="text"], input[type="date"], textarea {
-    width: 100%;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    font-family: 'DM Sans', sans-serif;
-    font-size: 13px;
-    padding: 8px 10px;
-    outline: none;
-    transition: border-color 0.2s;
-    resize: vertical;
-  }
-  input:focus, textarea:focus { border-color: var(--accent); }
+  .field-group { display: flex; flex-direction: column; gap: 5px; }
+  .field-label { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
 
-  .tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
-  .tag {
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 3px 10px;
-    font-size: 12px;
-    color: var(--muted);
-    font-family: 'DM Mono', monospace;
+  input[type="text"], textarea, select {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-family: 'DM Sans', sans-serif;
+    font-size: 13px; padding: 7px 10px; outline: none; transition: border-color 0.2s; resize: vertical;
   }
-  .tag.group { border-color: var(--accent2); color: var(--accent2); }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+  select option { background: var(--surface2); }
 
-  .divider {
-    height: 1px;
-    background: var(--border);
-    margin: 4px 0;
-  }
+  /* Dynamic list rows (relations, addresses) */
+  .list-item { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; position: relative; }
+  .list-item-row { display: flex; gap: 6px; }
+  .list-item-row input, .list-item-row select { flex: 1; }
+  .remove-btn { position: absolute; top: 8px; right: 8px; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px; flex: none; }
+  .remove-btn:hover { color: var(--danger); }
+  .add-btn { background: var(--surface2); border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-family: 'DM Mono', monospace; font-size: 11px; padding: 7px; cursor: pointer; text-align: center; transition: border-color 0.2s, color 0.2s; width: 100%; }
+  .add-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-  .panel-footer {
-    padding: 16px 20px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    gap: 8px;
-  }
-  button {
-    flex: 1;
-    padding: 9px 14px;
-    border-radius: 6px;
-    font-family: 'DM Mono', monospace;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    border: none;
-    transition: opacity 0.2s, transform 0.1s;
-  }
-  button:active { transform: scale(0.98); }
-  #save-btn {
-    background: var(--accent);
-    color: #fff;
-  }
+  /* Group checkboxes */
+  .group-list { display: flex; flex-direction: column; gap: 6px; }
+  .group-check { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
+  .group-check input[type="checkbox"] { accent-color: var(--accent2); width: 14px; height: 14px; flex-shrink: 0; }
+
+  .divider { height: 1px; background: var(--border); }
+
+  .panel-footer { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+  .footer-btns { display: flex; gap: 8px; }
+  button { padding: 9px 14px; border-radius: 6px; font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; cursor: pointer; border: none; transition: opacity 0.15s; }
+  #save-btn { flex: 1; background: var(--accent); color: #fff; }
   #save-btn:hover { opacity: 0.85; }
   #save-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  #cancel-btn {
-    background: var(--surface2);
-    color: var(--muted);
-    border: 1px solid var(--border);
-  }
+  #cancel-btn { flex: 1; background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
   #cancel-btn:hover { color: var(--text); }
 
-  .status-msg {
-    font-family: 'DM Mono', monospace;
-    font-size: 11px;
-    text-align: center;
-    padding: 6px;
-    border-radius: 4px;
-    display: none;
-  }
+  .status-msg { font-family: 'DM Mono', monospace; font-size: 11px; text-align: center; padding: 6px; border-radius: 4px; display: none; }
   .status-msg.success { background: rgba(62,207,142,0.12); color: var(--success); display: block; }
   .status-msg.error   { background: rgba(232,91,91,0.12);  color: var(--danger);  display: block; }
 
-  #loading {
-    position: fixed; inset: 0;
-    background: var(--bg);
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    gap: 16px; z-index: 999;
-  }
-  .spinner {
-    width: 36px; height: 36px;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-  }
+  #loading { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; z-index: 999; }
+  .spinner { width: 36px; height: 36px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   #loading p { font-family: 'DM Mono', monospace; font-size: 13px; color: var(--muted); }
 </style>
 </head>
 <body>
 
-<div id="loading">
-  <div class="spinner"></div>
-  <p>loading contacts...</p>
-</div>
+<div id="loading"><div class="spinner"></div><p>loading contacts...</p></div>
 
 <header>
   <div class="dot"></div>
   <h1>contact_map</h1>
   <div class="legend">
-    <div class="legend-item">
-      <div class="legend-dot" style="background:var(--node-person)"></div>
-      <span>person</span>
-    </div>
-    <div class="legend-item">
-      <div class="legend-dot" style="background:var(--node-group)"></div>
-      <span>group</span>
-    </div>
+    <div class="legend-item"><div class="legend-dot" style="background:#5b8dee"></div><span>person</span></div>
+    <div class="legend-item"><div class="legend-dot" style="background:#e85b8d"></div><span>group</span></div>
   </div>
 </header>
 
 <div class="main">
   <div id="graph"></div>
-
   <div id="panel">
     <div class="panel-header">
-      <h2>Contact</h2>
+      <h2 id="panel-title">Contact</h2>
       <button id="close-panel">×</button>
     </div>
     <div class="panel-body" id="panel-body"></div>
     <div class="panel-footer">
-      <button id="cancel-btn">Cancel</button>
-      <button id="save-btn">Save Changes</button>
+      <div class="footer-btns">
+        <button id="cancel-btn">Cancel</button>
+        <button id="save-btn">Save Changes</button>
+      </div>
+      <div class="status-msg" id="status-msg"></div>
     </div>
   </div>
 </div>
 
 <script>
 const API = 'http://localhost:5000/api';
-let network, allContacts = {}, currentContact = null;
+let network, allContacts = {}, allGroups = {}, currentContact = null;
 
-// ── Load data & build graph ──────────────────────────────────────────────────
+const RELATION_TYPES = ['spouse','child','mother','father','parent','brother','sister','friend','colleague','manager','assistant','partner','referred_by','domestic_partner','relative','other'];
+const ADDRESS_TYPES  = ['home','work','other'];
+
+// ── Load & build graph ───────────────────────────────────────────────────────
 async function loadGraph() {
   const res  = await fetch(`${API}/data`);
   const data = await res.json();
-  const { groups, contacts } = data;
-
-  // Index contacts by resourceName for quick lookup
-  contacts.forEach(c => allContacts[c.resourceName] = c);
+  allGroups  = data.groups;
+  data.contacts.forEach(c => allContacts[c.resourceName] = c);
 
   const nodes = new vis.DataSet();
   const edges = new vis.DataSet();
 
-  // Group nodes
-  Object.entries(groups).forEach(([rn, name]) => {
-    nodes.add({
-      id: rn, label: name, type: 'group',
+  Object.entries(allGroups).forEach(([rn, name]) => {
+    nodes.add({ id: rn, label: name, type: 'group',
       color: { background: '#1f1529', border: '#e85b8d', highlight: { background: '#2a1a38', border: '#e85b8d' } },
-      font: { color: '#e85b8d', size: 13, face: 'DM Mono' },
-      shape: 'dot', size: 22,
-      borderWidth: 2,
-    });
+      font: { color: '#e85b8d', size: 13, face: 'DM Mono' }, shape: 'dot', size: 22, borderWidth: 2 });
   });
 
-  // Person nodes + edges
-  contacts.forEach(c => {
-    nodes.add({
-      id: c.resourceName,
-      label: c.name,
-      type: 'person',
+  data.contacts.forEach(c => {
+    nodes.add({ id: c.resourceName, label: c.name, type: 'person',
       color: { background: '#111a2e', border: '#5b8dee', highlight: { background: '#162240', border: '#5b8dee' } },
-      font: { color: '#e2e8f8', size: 12, face: 'DM Sans' },
-      shape: 'dot', size: 14,
-      borderWidth: 1.5,
-    });
+      font: { color: '#e2e8f8', size: 12, face: 'DM Sans' }, shape: 'dot', size: 14, borderWidth: 1.5 });
     c.groups.forEach(grn => {
-      if (groups[grn]) {
-        edges.add({
-          from: c.resourceName, to: grn,
-          color: { color: '#252a38', highlight: '#5b8dee', opacity: 0.6 },
-          width: 1.5, smooth: { type: 'continuous' },
-        });
-      }
+      if (allGroups[grn]) edges.add({ from: c.resourceName, to: grn,
+        color: { color: '#252a38', highlight: '#5b8dee', opacity: 0.6 }, width: 1.5, smooth: { type: 'continuous' } });
     });
   });
 
-  const container = document.getElementById('graph');
-  network = new vis.Network(container, { nodes, edges }, {
-    physics: {
-      stabilization: { iterations: 150 },
-      barnesHut: { gravitationalConstant: -8000, springLength: 120, springConstant: 0.04 },
-    },
-    interaction: { hover: true, tooltipDelay: 200 },
+  network = new vis.Network(document.getElementById('graph'), { nodes, edges }, {
+    physics: { stabilization: { iterations: 150 }, barnesHut: { gravitationalConstant: -8000, springLength: 120, springConstant: 0.04 } },
+    interaction: { hover: true },
   });
 
   network.on('click', params => {
     if (!params.nodes.length) return;
-    const id = params.nodes[0];
-    const contact = allContacts[id];
+    const contact = allContacts[params.nodes[0]];
     if (contact) openPanel(contact);
   });
 
   document.getElementById('loading').style.display = 'none';
 }
 
-// ── Panel ────────────────────────────────────────────────────────────────────
+// ── Panel builder ────────────────────────────────────────────────────────────
 function openPanel(contact) {
   currentContact = contact;
+  document.getElementById('panel-title').textContent = contact.name;
   const body = document.getElementById('panel-body');
   body.innerHTML = '';
 
-  const fields = [
-    { label: 'Full Name', key: 'name', type: 'text', value: contact.name },
-    { label: 'Email(s)', key: 'emails', type: 'emails', value: contact.emails },
-    { label: 'Phone(s)', key: 'phones', type: 'phones', value: contact.phones },
-    { label: 'Birthday', key: 'birthday', type: 'date', value: contact.birthday },
-    { label: 'Notes / Bio', key: 'bio', type: 'textarea', value: contact.bio },
-  ];
+  // ── Basic fields
+  body.appendChild(sectionTitle('Basic Info'));
+  body.appendChild(textField('Full Name', 'name', contact.name));
+  body.appendChild(textField('Email(s)', 'emails', (contact.emails||[]).join(', '), 'email1@x.com, email2@x.com'));
+  body.appendChild(textField('Phone(s)', 'phones', (contact.phones||[]).map(p=>p.number).join(', '), '+1 555 000 0000'));
+  body.appendChild(textField('Birthday', 'birthday', contact.birthday||'', 'YYYY-MM-DD'));
+  body.appendChild(textareaField('Notes / Bio', 'bio', contact.bio||''));
 
-  fields.forEach(f => {
-    const group = document.createElement('div');
-    group.className = 'field-group';
-    const label = document.createElement('div');
-    label.className = 'field-label';
-    label.textContent = f.label;
-    group.appendChild(label);
+  // ── Address section
+  body.appendChild(sectionTitle('Addresses'));
+  const addrContainer = document.createElement('div');
+  addrContainer.id = 'addr-container';
+  addrContainer.style.display = 'flex'; addrContainer.style.flexDirection = 'column'; addrContainer.style.gap = '8px';
+  (contact.addresses||[]).forEach(a => addrContainer.appendChild(addressRow(a)));
+  body.appendChild(addrContainer);
+  const addAddrBtn = document.createElement('button');
+  addAddrBtn.className = 'add-btn'; addAddrBtn.textContent = '+ Add Address';
+  addAddrBtn.onclick = () => addrContainer.appendChild(addressRow({}));
+  body.appendChild(addAddrBtn);
 
-    if (f.type === 'text') {
-      const inp = document.createElement('input');
-      inp.type = 'text'; inp.value = f.value || '';
-      inp.dataset.key = f.key;
-      group.appendChild(inp);
-    } else if (f.type === 'date') {
-      const inp = document.createElement('input');
-      inp.type = 'text'; inp.placeholder = 'YYYY-MM-DD';
-      inp.value = f.value || '';
-      inp.dataset.key = f.key;
-      group.appendChild(inp);
-    } else if (f.type === 'textarea') {
-      const ta = document.createElement('textarea');
-      ta.rows = 3; ta.value = f.value || '';
-      ta.dataset.key = f.key;
-      group.appendChild(ta);
-    } else if (f.type === 'emails') {
-      const inp = document.createElement('input');
-      inp.type = 'text';
-      inp.value = (f.value || []).join(', ');
-      inp.dataset.key = f.key;
-      inp.placeholder = 'email1@x.com, email2@x.com';
-      group.appendChild(inp);
-    } else if (f.type === 'phones') {
-      const inp = document.createElement('input');
-      inp.type = 'text';
-      inp.value = (f.value || []).map(p => p.number).join(', ');
-      inp.dataset.key = f.key;
-      inp.placeholder = '+1 555 000 0000, ...';
-      group.appendChild(inp);
-    }
+  // ── Relationships section
+  body.appendChild(sectionTitle('Relationships'));
+  const relContainer = document.createElement('div');
+  relContainer.id = 'rel-container';
+  relContainer.style.display = 'flex'; relContainer.style.flexDirection = 'column'; relContainer.style.gap = '8px';
+  (contact.relations||[]).forEach(r => relContainer.appendChild(relationRow(r)));
+  body.appendChild(relContainer);
+  const addRelBtn = document.createElement('button');
+  addRelBtn.className = 'add-btn'; addRelBtn.textContent = '+ Add Relationship';
+  addRelBtn.onclick = () => relContainer.appendChild(relationRow({}));
+  body.appendChild(addRelBtn);
 
-    body.appendChild(group);
+  // ── Groups section
+  body.appendChild(sectionTitle('Groups'));
+  const groupList = document.createElement('div');
+  groupList.className = 'group-list'; groupList.id = 'group-list';
+  Object.entries(allGroups).forEach(([rn, name]) => {
+    const checked = (contact.groups||[]).includes(rn);
+    const label = document.createElement('label'); label.className = 'group-check';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = rn; cb.checked = checked;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(name));
+    groupList.appendChild(label);
   });
+  body.appendChild(groupList);
 
-  // Read-only info
+  // ── Read-only org
   if (contact.organizations?.length) {
-    body.appendChild(divider());
+    body.appendChild(sectionTitle('Organization'));
     const org = contact.organizations[0];
-    body.appendChild(readOnly('Organization', [org.title, org.name, org.department].filter(Boolean).join(' · ')));
+    body.appendChild(readOnly([org.title, org.name, org.department].filter(Boolean).join(' · ')));
   }
-  if (contact.relations?.length) {
-    body.appendChild(readOnly('Relationships', contact.relations.map(r => `${r.name} (${r.type})`).join(', ')));
-  }
-  if (contact.groupNames?.length) {
-    body.appendChild(divider());
-    const g = document.createElement('div');
-    g.className = 'field-group';
-    const gl = document.createElement('div'); gl.className = 'field-label'; gl.textContent = 'Groups';
-    const tags = document.createElement('div'); tags.className = 'tag-list';
-    contact.groupNames.forEach(name => {
-      const t = document.createElement('div'); t.className = 'tag group'; t.textContent = name;
-      tags.appendChild(t);
-    });
-    g.appendChild(gl); g.appendChild(tags);
-    body.appendChild(g);
-  }
-  if (contact.nicknames?.length) {
-    body.appendChild(readOnly('Nicknames', contact.nicknames.join(', ')));
-  }
-  if (contact.addresses?.length) {
-    body.appendChild(readOnly('Address', contact.addresses[0].formatted));
-  }
-
-  // Status msg
-  const msg = document.createElement('div');
-  msg.className = 'status-msg'; msg.id = 'status-msg';
-  body.appendChild(msg);
 
   document.getElementById('panel').classList.add('open');
   document.getElementById('save-btn').disabled = false;
+  document.getElementById('status-msg').className = 'status-msg';
 }
 
-function divider() {
-  const d = document.createElement('div'); d.className = 'divider'; return d;
+// ── Field helpers ─────────────────────────────────────────────────────────────
+function sectionTitle(text) {
+  const d = document.createElement('div'); d.className = 'section-title'; d.textContent = text; return d;
 }
-
-function readOnly(label, value) {
+function textField(label, key, value, placeholder='') {
   const g = document.createElement('div'); g.className = 'field-group';
   const l = document.createElement('div'); l.className = 'field-label'; l.textContent = label;
-  const v = document.createElement('div'); v.className = 'field-value' + (value ? '' : ' muted');
-  v.textContent = value || '—';
-  g.appendChild(l); g.appendChild(v);
-  return g;
+  const i = document.createElement('input'); i.type = 'text'; i.value = value; i.placeholder = placeholder; i.dataset.key = key;
+  g.appendChild(l); g.appendChild(i); return g;
+}
+function textareaField(label, key, value) {
+  const g = document.createElement('div'); g.className = 'field-group';
+  const l = document.createElement('div'); l.className = 'field-label'; l.textContent = label;
+  const t = document.createElement('textarea'); t.rows = 3; t.value = value; t.dataset.key = key;
+  g.appendChild(l); g.appendChild(t); return g;
+}
+function readOnly(value) {
+  const d = document.createElement('div'); d.style.fontSize = '13px'; d.style.color = '#6b7494'; d.textContent = value || '—'; return d;
 }
 
-function closePanel() {
-  document.getElementById('panel').classList.remove('open');
-  currentContact = null;
+function addressRow(a) {
+  const item = document.createElement('div'); item.className = 'list-item';
+  const removeBtn = document.createElement('button'); removeBtn.className = 'remove-btn'; removeBtn.textContent = '×';
+  removeBtn.onclick = () => item.remove();
+  item.appendChild(removeBtn);
+
+  const fields = [
+    ['Street', 'street', a.street||''],
+    ['City', 'city', a.city||''],
+    ['Region / State', 'region', a.region||''],
+    ['Country', 'country', a.country||''],
+    ['Postal Code', 'postalCode', a.postalCode||''],
+  ];
+  fields.forEach(([label, key, val]) => {
+    const row = document.createElement('div'); row.className = 'list-item-row';
+    const inp = document.createElement('input'); inp.type = 'text'; inp.placeholder = label; inp.value = val; inp.dataset.addrField = key;
+    row.appendChild(inp); item.appendChild(row);
+  });
+
+  // Type selector
+  const typeRow = document.createElement('div'); typeRow.className = 'list-item-row';
+  const sel = document.createElement('select'); sel.dataset.addrField = 'type';
+  ADDRESS_TYPES.forEach(t => { const o = document.createElement('option'); o.value = t; o.textContent = t; if (t === (a.type||'home')) o.selected = true; sel.appendChild(o); });
+  typeRow.appendChild(sel); item.appendChild(typeRow);
+  return item;
 }
 
-// ── Save ─────────────────────────────────────────────────────────────────────
+function relationRow(r) {
+  const item = document.createElement('div'); item.className = 'list-item';
+  const removeBtn = document.createElement('button'); removeBtn.className = 'remove-btn'; removeBtn.textContent = '×';
+  removeBtn.onclick = () => item.remove();
+  item.appendChild(removeBtn);
+
+  const row = document.createElement('div'); row.className = 'list-item-row';
+  const nameInp = document.createElement('input'); nameInp.type = 'text'; nameInp.placeholder = 'Name'; nameInp.value = r.name||''; nameInp.dataset.relField = 'name';
+  const sel = document.createElement('select'); sel.dataset.relField = 'type';
+  RELATION_TYPES.forEach(t => { const o = document.createElement('option'); o.value = t; o.textContent = t; if (t === (r.type||'other')) o.selected = true; sel.appendChild(o); });
+  row.appendChild(nameInp); row.appendChild(sel); item.appendChild(row);
+  return item;
+}
+
+// ── Collect & save ────────────────────────────────────────────────────────────
+function closePanel() { document.getElementById('panel').classList.remove('open'); currentContact = null; }
+
 async function saveContact() {
   if (!currentContact) return;
   const btn = document.getElementById('save-btn');
   btn.disabled = true; btn.textContent = 'Saving...';
 
-  const body = { resourceName: currentContact.resourceName };
+  const payload = { resourceName: currentContact.resourceName };
 
+  // Basic fields
   document.querySelectorAll('[data-key]').forEach(el => {
     const key = el.dataset.key;
-    if (key === 'emails') {
-      body.emails = el.value.split(',').map(s => s.trim()).filter(Boolean);
-    } else if (key === 'phones') {
-      body.phones = el.value.split(',').map(s => ({ number: s.trim(), type: 'mobile' })).filter(p => p.number);
-    } else {
-      body[key] = el.value.trim();
-    }
+    if (key === 'emails') payload.emails = el.value.split(',').map(s=>s.trim()).filter(Boolean);
+    else if (key === 'phones') payload.phones = el.value.split(',').map(s=>({number:s.trim(),type:'mobile'})).filter(p=>p.number);
+    else payload[key] = el.value.trim();
   });
 
+  // Addresses
+  payload.addresses = [];
+  document.querySelectorAll('#addr-container .list-item').forEach(item => {
+    const addr = {};
+    item.querySelectorAll('[data-addr-field]').forEach(el => { addr[el.dataset.addrField] = el.value.trim(); });
+    if (Object.values(addr).some(v => v)) payload.addresses.push(addr);
+  });
+
+  // Relations
+  payload.relations = [];
+  document.querySelectorAll('#rel-container .list-item').forEach(item => {
+    const rel = {};
+    item.querySelectorAll('[data-rel-field]').forEach(el => { rel[el.dataset.relField] = el.value.trim(); });
+    if (rel.name) payload.relations.push(rel);
+  });
+
+  // Groups
+  payload.groups = [];
+  document.querySelectorAll('#group-list input[type="checkbox"]:checked').forEach(cb => { payload.groups.push(cb.value); });
+
   try {
-    const res = await fetch(`${API}/update`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const res  = await fetch(`${API}/update`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     const data = await res.json();
-    const msg = document.getElementById('status-msg');
+    const msg  = document.getElementById('status-msg');
     if (data.success) {
       msg.textContent = '✓ Saved to Google Contacts';
       msg.className = 'status-msg success';
-      // Update local cache
-      Object.assign(allContacts[currentContact.resourceName], body);
+      Object.assign(allContacts[currentContact.resourceName], payload);
     } else {
       msg.textContent = data.error || 'Something went wrong';
       msg.className = 'status-msg error';
     }
-  } catch (e) {
+  } catch(e) {
     const msg = document.getElementById('status-msg');
     msg.textContent = 'Could not reach local server';
     msg.className = 'status-msg error';
@@ -695,6 +620,5 @@ if __name__ == "__main__":
     print("✓ Starting server at http://localhost:5000")
     print("  (Opening browser automatically...)\n")
     print("  Press Ctrl+C to stop.\n")
-
     threading.Thread(target=open_browser, daemon=True).start()
     app.run(port=5000, debug=False)
