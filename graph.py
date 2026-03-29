@@ -317,6 +317,7 @@ GRAPH_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <title>Contact Map</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CiAgPHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iOCIgZmlsbD0iIzBkMGYxNCIvPgogIDwhLS0gZWRnZXMgLS0+CiAgPGxpbmUgeDE9IjgiIHkxPSI4IiB4Mj0iMjQiIHkyPSIxNiIgc3Ryb2tlPSIjM2Q2ZmQ0IiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDxsaW5lIHgxPSI4IiB5MT0iOCIgeDI9IjE2IiB5Mj0iMjYiIHN0cm9rZT0iIzNkNmZkNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iMjQiIHkxPSIxNiIgeDI9IjE2IiB5Mj0iMjYiIHN0cm9rZT0iIzNkNmZkNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8bGluZSB4MT0iOCIgeTE9IjgiIHgyPSIyNCIgeTI9IjYiIHN0cm9rZT0iIzNkNmZkNCIgc3Ryb2tlLXdpZHRoPSIxLjUiLz4KICA8IS0tIGdyb3VwIG5vZGUgKHBpbmssIGxhcmdlcikgLS0+CiAgPGNpcmNsZSBjeD0iMTYiIGN5PSIxNiIgcj0iNC41IiBmaWxsPSIjZTg1YjhkIi8+CiAgPCEtLSBwZXJzb24gbm9kZXMgKGJsdWUsIHNtYWxsZXIpIC0tPgogIDxjaXJjbGUgY3g9IjgiIGN5PSI4IiByPSIzIiBmaWxsPSIjNWI4ZGVlIi8+CiAgPGNpcmNsZSBjeD0iMjQiIGN5PSIxNiIgcj0iMyIgZmlsbD0iIzViOGRlZSIvPgogIDxjaXJjbGUgY3g9IjE2IiBjeT0iMjYiIHI9IjMiIGZpbGw9IiM1YjhkZWUiLz4KICA8Y2lyY2xlIGN4PSIyNCIgY3k9IjYiIHI9IjMiIGZpbGw9IiM1YjhkZWUiLz4KPC9zdmc+">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.css">
 <style>
@@ -358,6 +359,8 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   .panel-header h2 { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
   #close-panel { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 20px; line-height: 1; padding: 2px 6px; border-radius: 4px; }
   #close-panel:hover { color: var(--text); background: var(--surface2); }
+  #refocus-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 3px 7px; transition: color 0.15s, border-color 0.15s; }
+  #refocus-btn:hover { color: var(--accent); border-color: var(--accent); }
 
   .panel-body { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
   .panel-body::-webkit-scrollbar { width: 4px; }
@@ -490,7 +493,10 @@ GRAPH_HTML = r"""<!DOCTYPE html>
   <div id="panel">
     <div class="panel-header">
       <h2 id="panel-title">Contact</h2>
-      <button id="close-panel">×</button>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button id="refocus-btn" title="Snap back to this node">⌖</button>
+        <button id="close-panel">×</button>
+      </div>
     </div>
     <div class="panel-body" id="panel-body"></div>
     <div class="panel-footer">
@@ -666,15 +672,23 @@ async function loadGraph() {
       return;
     }
     if (!params.nodes.length) {
-      // Clicking empty space — hide all edge labels and deselect
+      // Clicking empty space — hide all edge labels, deselect, close panel
       network.body.data.edges.forEach(e => {
         if (e._relType && e.label) network.body.data.edges.update({ id: e.id, label: '' });
       });
       network.unselectAll();
+      closePanel();
       return;
     }
-    const contact = allContacts[params.nodes[0]];
-    if (contact) openPanel(contact);
+    const id = params.nodes[0];
+    const contact = allContacts[id];
+    if (contact) {
+      openPanel(contact);
+    } else {
+      // Group node clicked — deselect and close panel
+      network.unselectAll();
+      closePanel();
+    }
   });
 
   network.on('hoverNode', () => { document.getElementById('graph').style.cursor = 'pointer'; });
@@ -1223,6 +1237,15 @@ document.addEventListener('input', e => {
   }
 });
 
+document.getElementById('refocus-btn').addEventListener('click', () => {
+  if (currentContact) {
+    network.focus(currentContact.resourceName, {
+      scale: 1.5,
+      animation: { duration: 600, easingFunction: 'easeInOutQuad' }
+    });
+    network.selectNodes([currentContact.resourceName]);
+  }
+});
 document.getElementById('close-panel').addEventListener('click', closePanel);
 document.getElementById('cancel-btn').addEventListener('click', closePanel);
 document.getElementById('save-btn').addEventListener('click', saveContact);
