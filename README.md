@@ -70,10 +70,7 @@ Samsung Contacts and other Android contact apps create their own internal groups
 
 - **They cannot be modified via the API** — Google blocks add/remove operations on them with a "Cannot modify a system contact group" error
 - **They cannot be deleted via the API** — attempts to delete them will fail
-- **Some are deprecated** — Samsung's default groups like `friends` and `family` (lowercase) are flagged as deprecated by Google and are completely read-only
 - **They create duplicates** — if you already have a "Family" group created in Google Contacts, Samsung may create a separate lowercase "family" group that appears as a duplicate
-
-The app filters out known Samsung default groups (`chatBuddies`, `coworkers`) automatically, but any new groups created through Samsung Contacts may cause similar issues.
 
 **The safest workflow is:**
 1. Create groups using the **+ Create** button in the app's group panel
